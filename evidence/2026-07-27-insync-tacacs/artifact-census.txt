@@ -1,0 +1,4 @@
+ztp artifacts on s3: 48
+artifacts with NO AAA/TACPLUS/TACPLUS_SERVER: 48
+artifacts still carrying SNMP/SNMP_COMMUNITY: 48
+tacacs_key present on host: True

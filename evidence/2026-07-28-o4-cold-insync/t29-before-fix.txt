@@ -1,0 +1,21 @@
+  profile: s1-512.yaml  expected push-scope switches=46
+      # first NOT-in-sync cold: dc1-pod001-bk-p1-r1-leaf01: SNMP_COMMUNITY 2/1 keys: unexpected 1 (public)
+  PASS  switches that FAILED to render: none
+  PASS  push-scope switches rendered: 46/46
+  FAIL  ZTP documents with no snmp section: 46 found
+  FAIL  ZTP snmp sections actually inspected: observed 0 (expected 46) — measured NOTHING, which is not a pass
+  PASS  snmp sections whose name does not resolve to the snmp plugin: none
+  PASS  snmp sections ordered AFTER the config (container would win the race): none
+  PASS  snmp sections naming a community the config_db does not carry: none
+  PASS  in sync as ZTP renders it (before the image's writer): 46/46
+  FAIL  in sync AFTER docker-snmp has run snmp_yml_to_configdb.py: observed 0 (expected 46) — measured NOTHING, which is not a pass
+  PASS  still pushed: ZTP writes no snmp.yml (the pre-fix renderer): 46/46
+  PASS  still pushed: ZTP writes 'public' into snmp.yml: 46/46
+  PASS  still pushed: ZTP writes another device's community: 46/46
+  PASS  still pushed: switch at FACTORY config: 46/46
+  PASS  still pushed: 'public' already in the DB from an earlier boot: 46/46
+  PASS  still pushed: one BGP peer missing: 46/46
+  PASS  still pushed: factory 32-port PORT table (178-session bug): 46/46
+  PASS  ZTP snmp sections rendered with NO snmp_secret: none
+  ----------------------------------------
+  t29-ztp-snmp-yml       14 passed  3 failed  0 skipped

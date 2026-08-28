@@ -1,0 +1,107 @@
+======================================================================
+=== oob-sw01 ( dc1-pod001-oob-sw01 )
+artifact tables: 27  box tables: 26
+TABLES ONLY IN BOX : []
+TABLES ONLY IN ART : ['INTERFACE']
+  INTERFACE: IDENTICAL (0 keys)
+  LOOPBACK_INTERFACE: IDENTICAL (2 keys)
+  BGP_NEIGHBOR: IDENTICAL (0 keys)
+  AAA: IDENTICAL (1 keys)
+  TACPLUS: IDENTICAL (1 keys)
+  TACPLUS_SERVER: IDENTICAL (1 keys)
+  PORT: IDENTICAL (64 keys)
+  SNMP: IDENTICAL (1 keys)
+  SNMP_COMMUNITY: DIFFERS art=1 box=2
+      only in BOX (extra)          [1]: ['public']
+  DROP tables present on box: []
+  MD.hostname: art='dc1-pod001-oob-sw01' box='dc1-pod001-oob-sw01' SAME
+  MD.bgp_asn: art='4200000046' box='4200000046' SAME
+  MD.type: art='LeafRouter' box='LeafRouter' SAME
+  MD.hwsku: art='Accton-AS7816-64X' box='Accton-AS7816-64X' SAME
+  FEATURE.snmp art: {'auto_restart': 'enabled', 'delayed': 'True', 'has_global_scope': 'True', 'has_per_asic_scope': 'False', 'high_mem_alert': 'disabled', 'state': 'enabled', 'support_syslog_rate_limit': 'true'}
+  FEATURE.snmp box: {'auto_restart': 'enabled', 'delayed': 'True', 'has_global_scope': 'True', 'has_per_asic_scope': 'False', 'high_mem_alert': 'disabled', 'state': 'enabled', 'support_syslog_rate_limit': 'true'}
+======================================================================
+=== oob-sw02 ( dc1-pod001-oob-sw02 )
+artifact tables: 27  box tables: 26
+TABLES ONLY IN BOX : []
+TABLES ONLY IN ART : ['INTERFACE']
+  INTERFACE: IDENTICAL (0 keys)
+  LOOPBACK_INTERFACE: IDENTICAL (2 keys)
+  BGP_NEIGHBOR: IDENTICAL (0 keys)
+  AAA: IDENTICAL (1 keys)
+  TACPLUS: IDENTICAL (1 keys)
+  TACPLUS_SERVER: IDENTICAL (1 keys)
+  PORT: IDENTICAL (64 keys)
+  SNMP: IDENTICAL (1 keys)
+  SNMP_COMMUNITY: DIFFERS art=1 box=2
+      only in BOX (extra)          [1]: ['public']
+  DROP tables present on box: []
+  MD.hostname: art='dc1-pod001-oob-sw02' box='dc1-pod001-oob-sw02' SAME
+  MD.bgp_asn: art='4200000047' box='4200000047' SAME
+  MD.type: art='LeafRouter' box='LeafRouter' SAME
+  MD.hwsku: art='Accton-AS7816-64X' box='Accton-AS7816-64X' SAME
+  FEATURE.snmp art: {'auto_restart': 'enabled', 'delayed': 'True', 'has_global_scope': 'True', 'has_per_asic_scope': 'False', 'high_mem_alert': 'disabled', 'state': 'enabled', 'support_syslog_rate_limit': 'true'}
+  FEATURE.snmp box: {'auto_restart': 'enabled', 'delayed': 'True', 'has_global_scope': 'True', 'has_per_asic_scope': 'False', 'high_mem_alert': 'disabled', 'state': 'enabled', 'support_syslog_rate_limit': 'true'}
+======================================================================
+=== bk-p1-spine01 ( dc1-pod001-bk-p1-spine01 )
+artifact tables: 28  box tables: 28
+TABLES ONLY IN BOX : []
+TABLES ONLY IN ART : []
+  INTERFACE: IDENTICAL (32 keys)
+  LOOPBACK_INTERFACE: IDENTICAL (2 keys)
+  BGP_NEIGHBOR: IDENTICAL (16 keys)
+  AAA: IDENTICAL (1 keys)
+  TACPLUS: IDENTICAL (1 keys)
+  TACPLUS_SERVER: IDENTICAL (1 keys)
+  PORT: IDENTICAL (64 keys)
+  SNMP: IDENTICAL (1 keys)
+  SNMP_COMMUNITY: IDENTICAL (1 keys)
+  DROP tables present on box: []
+  MD.hostname: art='dc1-pod001-bk-p1-spine01' box='dc1-pod001-bk-p1-spine01' SAME
+  MD.bgp_asn: art='4200000032' box='4200000032' SAME
+  MD.type: art='SpineRouter' box='SpineRouter' SAME
+  MD.hwsku: art='Accton-AS7816-64X' box='Accton-AS7816-64X' SAME
+  FEATURE.snmp art: {'auto_restart': 'enabled', 'delayed': 'True', 'has_global_scope': 'True', 'has_per_asic_scope': 'False', 'high_mem_alert': 'disabled', 'state': 'enabled', 'support_syslog_rate_limit': 'true'}
+  FEATURE.snmp box: {'auto_restart': 'enabled', 'delayed': 'True', 'has_global_scope': 'True', 'has_per_asic_scope': 'False', 'high_mem_alert': 'disabled', 'state': 'enabled', 'support_syslog_rate_limit': 'true'}
+======================================================================
+=== bk-p1-r1-leaf01 ( dc1-pod001-bk-p1-r1-leaf01 )
+artifact tables: 28  box tables: 28
+TABLES ONLY IN BOX : []
+TABLES ONLY IN ART : []
+  INTERFACE: IDENTICAL (68 keys)
+  LOOPBACK_INTERFACE: IDENTICAL (2 keys)
+  BGP_NEIGHBOR: IDENTICAL (34 keys)
+  AAA: IDENTICAL (1 keys)
+  TACPLUS: IDENTICAL (1 keys)
+  TACPLUS_SERVER: IDENTICAL (1 keys)
+  PORT: IDENTICAL (64 keys)
+  SNMP: IDENTICAL (1 keys)
+  SNMP_COMMUNITY: IDENTICAL (1 keys)
+  DROP tables present on box: []
+  MD.hostname: art='dc1-pod001-bk-p1-r1-leaf01' box='dc1-pod001-bk-p1-r1-leaf01' SAME
+  MD.bgp_asn: art='4200000000' box='4200000000' SAME
+  MD.type: art='LeafRouter' box='LeafRouter' SAME
+  MD.hwsku: art='Accton-AS7816-64X' box='Accton-AS7816-64X' SAME
+  FEATURE.snmp art: {'auto_restart': 'enabled', 'delayed': 'True', 'has_global_scope': 'True', 'has_per_asic_scope': 'False', 'high_mem_alert': 'disabled', 'state': 'enabled', 'support_syslog_rate_limit': 'true'}
+  FEATURE.snmp box: {'auto_restart': 'enabled', 'delayed': 'True', 'has_global_scope': 'True', 'has_per_asic_scope': 'False', 'high_mem_alert': 'disabled', 'state': 'enabled', 'support_syslog_rate_limit': 'true'}
+======================================================================
+=== fr-leaf01 ( dc1-pod001-fr-leaf01 )
+artifact tables: 28  box tables: 28
+TABLES ONLY IN BOX : []
+TABLES ONLY IN ART : []
+  INTERFACE: IDENTICAL (104 keys)
+  LOOPBACK_INTERFACE: IDENTICAL (2 keys)
+  BGP_NEIGHBOR: IDENTICAL (51 keys)
+  AAA: IDENTICAL (1 keys)
+  TACPLUS: IDENTICAL (1 keys)
+  TACPLUS_SERVER: IDENTICAL (1 keys)
+  PORT: IDENTICAL (64 keys)
+  SNMP: IDENTICAL (1 keys)
+  SNMP_COMMUNITY: IDENTICAL (1 keys)
+  DROP tables present on box: []
+  MD.hostname: art='dc1-pod001-fr-leaf01' box='dc1-pod001-fr-leaf01' SAME
+  MD.bgp_asn: art='4200000036' box='4200000036' SAME
+  MD.type: art='LeafRouter' box='LeafRouter' SAME
+  MD.hwsku: art='Accton-AS7816-64X' box='Accton-AS7816-64X' SAME
+  FEATURE.snmp art: {'auto_restart': 'enabled', 'delayed': 'True', 'has_global_scope': 'True', 'has_per_asic_scope': 'False', 'high_mem_alert': 'disabled', 'state': 'enabled', 'support_syslog_rate_limit': 'true'}
+  FEATURE.snmp box: {'auto_restart': 'enabled', 'delayed': 'True', 'has_global_scope': 'True', 'has_per_asic_scope': 'False', 'high_mem_alert': 'disabled', 'state': 'enabled', 'support_syslog_rate_limit': 'true'}

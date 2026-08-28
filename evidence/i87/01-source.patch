@@ -1,0 +1,1107 @@
+--- /dev/null
++++ b/gpufab-platform/tools/features/__init__.py
+@@ -0,0 +1,85 @@
++"""Feature modules — capability declared in the profile instead of edited into code.
++
++WHY THIS PACKAGE LIVES IN gpufab-platform AND NOT gpufab-network
++----------------------------------------------------------------
++FEATURE-EXTENSIBILITY.md §3.2 names `gpufab-network/tools/features/`. It also
++says, in the same section, that "`declare`, `allocate` and `applies_to` run
++inside `fabric_model`" — and `fabric_model` is in gpufab-PLATFORM. Those two
++sentences cannot both be honoured, because the dependency between the repos
++runs one way only:
++
++    render_fabric_ztp.py:40-48   appends gpufab-platform/tools to sys.path and
++                                 imports fabric_model, gpufab, interim_deploy
++    gpufab-platform/tools/*      imports nothing from gpufab-network; it names
++                                 network paths as STRINGS for deploy stages
++                                 (gpufab.py:507-523), never as modules
++
++network -> platform is an established import. platform -> network is not one,
++and `expected.py` in particular sets sys.path to its own directory alone
++(expected.py:33), so it could not reach a module in the other repo at all.
++
++Four consumers must load a feature module: fabric_model (platform),
++expected.py (platform), the test suite (platform/tests), and the composer
++inside render_fabric_ztp (network — which already has platform/tools on its
++path). This directory is the only location all four reach without inverting the
++dependency arrow. Siting it in network would make `expected.py --key evpn_*`
++unresolvable, and the oracle half is the specific thing #56 was about.
++
++DISCOVERY IS A DIRECTORY SCAN, NOT A LIST
++-----------------------------------------
++The same rule render_revision.py uses for its data globs, for the reason it
++states: "a hardcoded list that silently stops covering a new data file is the
++same defect class this closes." Dropping a file in this directory registers it.
++There is no second place to remember, so there is no second place to forget.
++"""
++from __future__ import annotations
++
++import importlib
++import pkgutil
++from pathlib import Path
++
++# The interface §3.2 specifies. A module missing any of these is incomplete,
++# not merely quieter: every consumer calls every one of them, so an absent name
++# surfaces as an AttributeError inside a render loop rather than as "this
++# module is not finished".
++_REQUIRED_ATTRS = ("NAME", "REQUIRES", "POOLS", "SCHEMA",
++                   "declare", "allocate", "applies_to",
++                   "config_db", "frr_conf", "expected", "observe")
++
++_CACHE = None
++
++
++def discover():
++    """Every feature module in this directory, keyed by NAME.
++
++    Scanned, not listed. Cached because this runs inside derive(), which every
++    consumer calls, and re-importing per device at 124 devices is not free.
++    """
++    global _CACHE
++    if _CACHE is not None:
++        return _CACHE
++    mods = {}
++    here = Path(__file__).resolve().parent
++    for info in pkgutil.iter_modules([str(here)]):
++        if info.name.startswith("_"):
++            continue
++        mod = importlib.import_module(f"{__name__}.{info.name}")
++        missing = [a for a in _REQUIRED_ATTRS if not hasattr(mod, a)]
++        if missing:
++            raise ImportError(
++                f"feature module {info.name!r} is missing {missing}. Every "
++                f"module must implement the whole interface; a partial module "
++                f"renders on some paths and silently not on others.")
++        if mod.NAME != info.name:
++            raise ImportError(
++                f"feature module {info.name!r} declares NAME={mod.NAME!r}. The "
++                f"filename IS the profile key, so they must agree — otherwise a "
++                f"profile can name a feature no scan will ever find.")
++        mods[mod.NAME] = mod
++    _CACHE = mods
++    return mods
++
++
++def names():
++    """The allow-list. Computed from what is on disk, never maintained."""
++    return tuple(sorted(discover()))
+--- /dev/null
++++ b/gpufab-platform/tools/features/evpn.py
+@@ -0,0 +1,520 @@
++"""evpn — an EVPN/VXLAN overlay on the FRONTEND fabric.
++
++KIND: config-only. It adds tables to devices the topology already contains; it
++adds no device, no link and no clab node, so §5.10/gen_topology are untouched.
++(FEATURE-EXTENSIBILITY §6.4 requires a module to say which kind it is.)
++
++THE MODULE IS CALLED `evpn`, NOT `vxlan`, AND THAT IS LOAD-BEARING.
++The `vxlan` token already belongs to the SIMULATOR'S OWN TRANSPORT:
++clab/gen_topology._vni() allocates `100 + sha256(...) % 16_000_000` for
++cross-host link transport on UDP 14789, clab/reconcile.py:121-128,364-373
++partitions local from remote links on `type == "vxlan"`, and
++tests/t25-reconcile.sh:100,202 counts `!= "vxlan"` to avoid double-counting the
++two topology entries a cross-host link produces. Taking the token back would
++corrupt three working measurements. The two encapsulations never meet: the
++substrate rides UDP 14789 between fabric HOSTS, this one rides UDP 4789 between
++simulated switch loopbacks.
++
++WHICH FABRIC CARRIES IT — frontend. See the module's `FABRICS_DEFAULT` note.
++
++THE FIDELITY CEILING, STATED RATHER THAN DISCOVERED
++MEASURED on gpufab-s11 2026-07-28: the switches run `asic_type: vs`,
++`docker-syncd-vs`, i.e. libsai_vs — a SOFTWARE dataplane. VXLAN state programs
++faithfully all the way into ASIC_DB, and there is no VXLAN encap/decap
++forwarding behind it. So `observe()` verifies that orchagent asked SAI to build
++a VXLAN tunnel object; it does NOT and must not claim a frame crossed one.
++FEATURE-EXTENSIBILITY §5.6 is explicit about this case: verify at the deepest
++layer that IS observable and record the limitation, "rather than passing on
++config_db alone and calling it working". A capture-based proof (the FV-CAP-02
++pattern) is meaningless on this image and is deliberately not attempted.
++
++The image itself is capable: `vxlanmgrd RUNNING` in swss,
++/usr/local/yang-models/sonic-vxlan.yang present and declaring exactly the three
++tables below, `show vxlan tunnel|remotevtep|vlanvnimap` all rc=0, and FRR 10.3
++answering `show bgp l2vpn evpn summary`. Recorded in nos_catalog as measured.
++
++WHAT THIS MODULE DOES NOT EMIT, AND WHY IT IS NOT A BUG
++VLAN_MEMBER is absent. Binding a host-facing front-panel port into a VLAN needs
++the port-assignment map, which lives in the RENDERER (render_fabric_ztp resolves
++NetBox interfaces to Ethernet<n> through interim_deploy.vm_port), not in the
++model. `config_db(device, model, alloc)` is handed a model device and has no
++port names to be correct about. Emitting a guessed port name here would be a
++second derivation of a value the renderer owns — the #79 shape this interface
++exists to prevent. The tunnel and the VLAN-to-VNI mapping do not depend on it:
++vxlanmgrd programs a VTEP from VXLAN_TUNNEL + VXLAN_TUNNEL_MAP whether or not a
++port is a member, so the tier-2 proof is unaffected. Recorded in UNVERIFIED-
++style prose rather than left to be discovered.
++"""
++from __future__ import annotations
++
++NAME = "evpn"
++
++# Keys in nos_catalog capabilities. A NOS that does not declare BOTH true is
++# refused at derive time by fabric_model.check_nos_capabilities().
++REQUIRES = ("vxlan_dataplane", "evpn_control_plane")
++
++# Identifier namespaces this module claims. Declared so that a second module
++# claiming `vni` is a visible conflict rather than a silent overlap.
++POOLS = ("vni", "vlan")
++
++# The profile block's shape. Any key not named here is refused BY NAME.
++SCHEMA = {"fabrics": list, "segments": list, "vni_base": int, "anycast_gw": bool}
++
++# Frontend, and the word is "fabric" not "plane" (§5.1). Four reasons, each
++# checkable against this repository rather than against vendor documentation:
++#
++#  1. The backend is pure L3 by design AND by measurement — rail-optimised /31 +
++#     eBGP + ECMP, converging 1464/1464 with no overlay. An overlay there adds
++#     encapsulation to RoCE traffic whose entire point is that it has none.
++#     gpufab-sim-design.md:227 records it as risk R3, "Designed out".
++#  2. Storage is the same pattern plus a service VIP (10.255.2.100/32) advertised
++#     by the active DDN controller — anycast that already works without an
++#     overlay, on links that are equally latency- and loss-sensitive.
++#  3. The frontend is the ONLY fabric that already carries L2. s1-512.yaml
++#     declares `frontend: {leaves: 3, spines: 2, peer_links: 1}`; storage
++#     declares no peer_links, because only a single-active SVI gateway needs one.
++#     That peer link is a structural signal in the profile itself.
++#  4. design/policy/addressing.yaml already declares `frontend_vlans` — VLAN 100
++#     compute and VLAN 200 provisioning, with prefixes and gateways — and
++#     MEASURED: nothing in either repo reads it. Grepped 2026-07-28, zero hits
++#     outside t01-provenance's checksum sweep. A declared policy nothing consumes
++#     is worse than none.
++#
++# The default is not a restriction: a profile may name any fabric, including
++# backend. A simulator must reproduce what a customer might do, including the
++# unwise. The model refuses combinations that are IMPOSSIBLE, not inadvisable.
++FABRICS_DEFAULT = ("frontend",)
++
++# Named here rather than imported from fabric_model, which imports THIS package
++# and would make the cycle. One tuple, and declare() checks against it so a
++# typo'd fabric is a named error instead of a silent zero-device selection.
++_FABRICS = ("backend", "frontend", "storage", "oob")
++
++# VNIs are the low, readable band a real deployment uses: vni = VNI_BASE + vlan,
++# so VLAN 100 is 10100. Disjointness from the substrate's own VNI band
++# ([100, 16_000_099], see gen_topology._vni) is NOT asserted, deliberately: the
++# two live on different UDP ports between different endpoints and cannot collide
++# on the wire. Asserting a constraint that does not exist would be a check that
++# measures nothing, which is the thing this project keeps building.
++VNI_BASE_DEFAULT = 10_000
++
++_VNI_MAX = 1 << 24          # VXLAN's 24-bit VNI field; hard wire-format limit
++_VLAN_MIN, _VLAN_MAX = 2, 4094   # 1 is default, 4095 reserved
++
++
++class _Err(Exception):
++    """Raised as fabric_model.ModelError by the caller; see declare()."""
++
++
++def declare(profile, error=_Err):
++    """Validate and normalise this feature's profile block.
++
++    Returns {} when the feature is absent or explicitly off, so every existing
++    profile renders byte-identically. An unknown key INSIDE the block raises,
++    naming it and listing the legal set — because unknown profile keys are
++    otherwise ignored without complaint, and a typo'd `segement:` would read as
++    "no segments" while its author believed the overlay was configured.
++
++    `error` is injected so this module needs no import from fabric_model, which
++    would be circular: fabric_model imports features, not the reverse.
++    """
++    block = ((profile.get("features") or {}).get(NAME))
++    if block in (None, False):
++        return {}
++    if block is True:
++        raise error(
++            f"features.{NAME} is `true` with no body. This feature needs at "
++            f"least `segments:`; a bare toggle would render an overlay with "
++            f"nothing in it and report success.")
++    if not isinstance(block, dict):
++        raise error(f"features.{NAME} must be a mapping, got {type(block).__name__}")
++
++    unknown = [k for k in block if k not in SCHEMA]
++    if unknown:
++        raise error(
++            f"features.{NAME} names unknown key(s) {sorted(unknown)} "
++            f"(known: {sorted(SCHEMA)}). Unknown profile keys are otherwise "
++            f"ignored silently, so a typo reads as 'off' while looking on.")
++    for k, want in SCHEMA.items():
++        if k in block and not isinstance(block[k], want):
++            raise error(
++                f"features.{NAME}.{k} must be {want.__name__}, got "
++                f"{type(block[k]).__name__}")
++
++    fabrics = tuple(block.get("fabrics") or FABRICS_DEFAULT)
++    if not fabrics:
++        raise error(f"features.{NAME}.fabrics is empty — name at least one fabric")
++    bad = [f for f in fabrics if f not in _FABRICS]
++    if bad:
++        raise error(
++            f"features.{NAME}.fabrics names {sorted(bad)}, which is not a "
++            f"fabric (known: {list(_FABRICS)}). A typo here selects no device "
++            f"and the overlay renders nowhere.")
++    # REFUSING oob IS A CORRECTNESS RULE, NOT TASTE, and it was found by a
++    # control rather than by reading. MEASURED: the two OOB switches carry
++    # tier="leaf" and a loopback, so the tier-based VTEP selection below
++    # matched them and this module rendered a full VXLAN overlay onto the
++    # fabric's two MANAGEMENT switches — which have no p2p links, no BGP
++    # session, an empty INTERFACE table, and are excluded from the 46 the push
++    # manages. derive() itself skips oob when assigning p2p addressing
++    # ("oob is L2/mgmt, not a routed p2p"), so a VTEP there has no routed
++    # underlay to source from and no remote VTEP could ever reach it.
++    #
++    # §5.1 requires the mechanism to permit `fabrics: [backend]` — a customer
++    # may do something unwise and a simulator must reproduce it. This is the
++    # other category: impossible, not inadvisable. backend stays permitted.
++    if "oob" in fabrics:
++        raise error(
++            f"features.{NAME}.fabrics names 'oob'. The OOB fabric is an "
++            f"unrouted L2 management segment — derive() gives its links no /31 "
++            f"and its switches no BGP session — so a VTEP there has no "
++            f"underlay to source a tunnel from. This is refused as impossible, "
++            f"not discouraged as unwise; 'backend' remains permitted.")
++
++    raw = block.get("segments")
++    if not raw:
++        raise error(
++            f"features.{NAME} declares no segments. An overlay with no segment "
++            f"renders VXLAN_TUNNEL and nothing to carry, and every count the "
++            f"oracle derives would be zero — which t_count would pass (0/0).")
++
++    segs, seen_vlan, seen_name = [], {}, {}
++    for i, s in enumerate(raw):
++        if not isinstance(s, dict):
++            raise error(f"features.{NAME}.segments[{i}] must be a mapping")
++        extra = [k for k in s if k not in ("name", "vlan", "prefix")]
++        if extra:
++            raise error(
++                f"features.{NAME}.segments[{i}] names unknown key(s) "
++                f"{sorted(extra)} (known: ['name', 'prefix', 'vlan'])")
++        name = str(s.get("name") or "").strip()
++        if not name:
++            raise error(f"features.{NAME}.segments[{i}] has no name")
++        if name in seen_name:
++            raise error(
++                f"features.{NAME}: segment name {name!r} declared twice "
++                f"(indices {seen_name[name]} and {i})")
++        seen_name[name] = i
++        try:
++            vlan = int(s["vlan"])
++        except (KeyError, TypeError, ValueError):
++            raise error(
++                f"features.{NAME}.segments[{i}] ({name}) has no integer `vlan`")
++        if not (_VLAN_MIN <= vlan <= _VLAN_MAX):
++            raise error(
++                f"features.{NAME}: segment {name!r} vlan {vlan} outside "
++                f"{_VLAN_MIN}..{_VLAN_MAX} (1 is the default VLAN, 4095 reserved)")
++        if vlan in seen_vlan:
++            raise error(
++                f"features.{NAME}: vlan {vlan} declared by both "
++                f"{seen_vlan[vlan]!r} and {name!r}. Two segments on one VLAN "
++                f"would map two VNIs onto one broadcast domain.")
++        seen_vlan[vlan] = name
++        segs.append({"name": name, "vlan": vlan,
++                     "prefix": str(s["prefix"]).strip() if s.get("prefix") else None})
++
++    vni_base = int(block.get("vni_base", VNI_BASE_DEFAULT))
++    if vni_base < 1:
++        raise error(f"features.{NAME}.vni_base must be >= 1, got {vni_base}")
++
++    return {"fabrics": fabrics,
++            "segments": segs,
++            "vni_base": vni_base,
++            "anycast_gw": bool(block.get("anycast_gw", False))}
++
++
++def allocate(model, decl, error=_Err):
++    """Every identifier this feature needs. THE ONLY PLACE A VNI IS COMPUTED.
++
++    Two derivations of one value is the defect this project has produced three
++    times (#79, and the two the comment above that call site names). Every
++    consumer — the composer, the oracle, the device check — reads the dict this
++    returns; none of them recomputes `vni_base + vlan`, and there is no second
++    expression anywhere that could disagree.
++
++    `vtep_src` REFERENCES device["loopback"], which Addressing.loopback() owns.
++    It is not recomputed here even though the arithmetic would be easy, because
++    a module that recomputes a model-owned value — even correctly — is #79.
++    """
++    if not decl:
++        return {}
++
++    prof = model.get("profile") or {}
++    envelope = ((prof.get("addressing") or {}).get("envelope") or {})
++    # Bound comes from the DECLARED envelope, exactly like every other pool in
++    # this model: exceeding it is a named error, never a silent renumber, so
++    # growing the overlay is a reviewed decision rather than a side effect.
++    cap = envelope.get("vni")
++    segs = decl["segments"]
++    if cap is not None and len(segs) > int(cap):
++        raise error(
++            f"features.{NAME} declares {len(segs)} segments but "
++            f"addressing.envelope.vni is {cap}. Raise the envelope in the "
++            f"profile. Widening it is safe for VNIs (they are positional on "
++            f"vlan id, not sequential), but it is declared so the growth is "
++            f"visible rather than inferred.")
++
++    base = decl["vni_base"]
++    segments = []
++    for s in segs:
++        vni = base + s["vlan"]          # <- THE derivation. One expression.
++        if not (0 < vni < _VNI_MAX):
++            raise error(
++                f"features.{NAME}: segment {s['name']!r} vlan {s['vlan']} with "
++                f"vni_base {base} gives VNI {vni}, outside VXLAN's 24-bit field "
++                f"(1..{_VNI_MAX - 1}). Lower features.{NAME}.vni_base.")
++        gw = None
++        if decl["anycast_gw"]:
++            if not s["prefix"]:
++                raise error(
++                    f"features.{NAME}: anycast_gw is on but segment "
++                    f"{s['name']!r} declares no `prefix`, so there is no "
++                    f"network to put a gateway on.")
++            gw = _first_host(s["prefix"], error)
++        segments.append({"name": s["name"], "vlan": s["vlan"], "vni": vni,
++                         "prefix": s["prefix"], "anycast_gw": gw,
++                         "vlan_if": f"Vlan{s['vlan']}"})
++
++    vteps = sorted(d["name"] for d in model.get("devices", [])
++                   if _is_vtep(d, decl))
++    if not vteps:
++        raise error(
++            f"features.{NAME} is enabled on fabrics {list(decl['fabrics'])} but "
++            f"that selects zero VTEP devices in this topology. A feature that "
++            f"renders nothing anywhere is a profile error, not a no-op: every "
++            f"derived count would be zero and every 0/0 assertion would pass.")
++
++    return {"segments": segments, "vteps": vteps,
++            "transits": sorted(d["name"] for d in model.get("devices", [])
++                               if _is_transit(d, decl)),
++            "vni_base": base, "fabrics": tuple(decl["fabrics"]),
++            "anycast_gw": decl["anycast_gw"]}
++
++
++def _first_host(prefix, error=_Err):
++    """The .1 of a segment prefix. One derivation, used for every consumer."""
++    import ipaddress
++    try:
++        net = ipaddress.ip_network(str(prefix), strict=False)
++    except ValueError as e:
++        raise error(f"features.{NAME}: bad segment prefix {prefix!r}: {e}")
++    if net.num_addresses < 4:
++        raise error(
++            f"features.{NAME}: segment prefix {prefix} is too small to host a "
++            f"gateway and any endpoints")
++    return f"{ipaddress.ip_address(int(net.network_address) + 1)}/{net.prefixlen}"
++
++
++def _is_vtep(device, decl):
++    """Leaves in the named fabrics terminate tunnels.
++
++    SELECTION IS BY MODEL FIELDS, never by name substring. fabric_model
++    recovers `plane` by matching '-p2-' inside a device name
++    (fabric_model.py:886-888, :1423-1432); that is a trap, not a pattern to
++    copy — it silently reclassifies any device whose name happens to contain
++    the token.
++    """
++    return (device.get("fabric") in decl["fabrics"]
++            and device.get("tier") == "leaf")
++
++
++def _is_transit(device, decl):
++    """Spines in the named fabrics carry EVPN routes but terminate no tunnel."""
++    return (device.get("fabric") in decl["fabrics"]
++            and device.get("tier") == "spine")
++
++
++def applies_to(device, model, decl):
++    """Does this module contribute anything to this device at all?"""
++    if not decl:
++        return False
++    return _is_vtep(device, decl) or _is_transit(device, decl)
++
++
++def config_db(device, model, alloc):
++    """Only the tables this module owns. The frr_render.to_config_db contract:
++    fragments for the caller to merge, never a copy of a whole config.
++
++    Spines get {} — they carry EVPN routes in FRR and terminate no tunnel, so
++    they own no config_db table. Returning {} rather than omitting the call is
++    deliberate: the composer then records honestly that evpn contributed nothing
++    here, instead of the device silently never being considered.
++    """
++    if not alloc or not _is_vtep(device, {"fabrics": alloc["fabrics"]}):
++        return {}
++
++    lo = device.get("loopback")
++    if not lo:
++        # Referenced, never recomputed — and refused rather than guessed. A
++        # VTEP with a source address this module invented would form tunnels
++        # nobody routes to, and every artifact-level check would agree it was
++        # configured correctly.
++        raise _Err(
++            f"features.{NAME}: {device.get('name')} is a VTEP but the model "
++            f"gives it no loopback. VXLAN_TUNNEL.src_ip must reference "
++            f"Addressing.loopback(); computing one here would be #79.")
++
++    vlan, vlan_if, tunnel_map = {}, {}, {}
++    for s in alloc["segments"]:
++        vlan[s["vlan_if"]] = {"vlanid": str(s["vlan"])}
++        if s["anycast_gw"]:
++            # SONiC models an SVI as two keys: the interface, and the interface
++            # with its prefix. Same shape INTERFACE/LOOPBACK_INTERFACE use.
++            vlan_if[s["vlan_if"]] = {}
++            vlan_if[f"{s['vlan_if']}|{s['anycast_gw']}"] = {}
++        tunnel_map[f"vtep|map_{s['vni']}_{s['vlan_if']}"] = {
++            "vni": str(s["vni"]), "vlan": s["vlan_if"]}
++
++    out = {
++        "VLAN": vlan,
++        "VXLAN_TUNNEL": {"vtep": {"src_ip": str(lo)}},
++        "VXLAN_EVPN_NVO": {"nvo": {"source_vtep": "vtep"}},
++        "VXLAN_TUNNEL_MAP": tunnel_map,
++    }
++    if vlan_if:
++        out["VLAN_INTERFACE"] = vlan_if
++    return out
++
++
++def frr_conf(device, model, alloc):
++    """Stanzas for the second artifact, where config_db cannot express it.
++
++    SONiC translates config_db -> FRR through bgpcfgd, and that translator is
++    the constraint, not FRR. config_db has no representation for an l2vpn evpn
++    address family, exactly as it has none for an interface-keyed BGP_NEIGHBOR
++    (upstream sonic-buildimage#26960) — which is why this project already ships
++    a rendered frr.conf and stage 55. The same seam carries this.
++
++    Spines need `route-target all` retention: on an eBGP EVPN underlay a spine
++    that does not import a route target discards routes it is supposed to
++    reflect, and the overlay silently loses remote VTEPs while every session
++    stays Established.
++    """
++    if not alloc:
++        return []
++    decl = {"fabrics": alloc["fabrics"]}
++    if _is_vtep(device, decl):
++        return ["  address-family l2vpn evpn",
++                "   advertise-all-vni",
++                "   advertise-default-gw" if alloc["anycast_gw"] else "   ! no anycast gw",
++                "  exit-address-family"]
++    if _is_transit(device, decl):
++        return ["  address-family l2vpn evpn",
++                # Not cosmetic: without this a spine drops what it should carry.
++                "   route-target all",
++                "  exit-address-family"]
++    return []
++
++
++def expected(model, alloc):
++    """Oracle entries. Each is {key, value, must, because}.
++
++    An entry with no `must` is REFUSED by expected.py, because a number nothing
++    compares is the exact shape of the defect that let
++    `max_ports_per_switch` print 70 against a 64-port platform and exit 0 for
++    the life of the project.
++
++    Every value is DERIVED — len(segments) x len(vteps) — never written down.
++    """
++    if not alloc:
++        return []
++    n_seg, n_vtep = len(alloc["segments"]), len(alloc["vteps"])
++    n_gw = sum(1 for s in alloc["segments"] if s["anycast_gw"])
++    return [
++        {"key": "evpn_vteps", "value": n_vtep,
++         "must": "> 0",
++         "because": "a declared overlay that selects no VTEP renders nothing, "
++                    "and every count below would be 0 — which t_count passes"},
++        {"key": "evpn_segments", "value": n_seg,
++         "must": "> 0",
++         "because": "an overlay with no segment carries nothing"},
++        {"key": "evpn_vxlan_tunnels", "value": n_vtep,
++         "must": "== evpn_vteps",
++         "because": "exactly one VTEP source interface per VTEP device; two "
++                    "would mean two source addresses for one switch"},
++        {"key": "evpn_tunnel_maps", "value": n_seg * n_vtep,
++         "must": "== evpn_segments * evpn_vteps",
++         "because": "every VTEP maps every segment; a missing map is a silently "
++                    "unreachable segment on one leaf"},
++        {"key": "evpn_vlans", "value": n_seg * n_vtep,
++         "must": "== evpn_segments * evpn_vteps",
++         "because": "the VLAN must exist on the VTEP before a tunnel map can "
++                    "reference it"},
++        {"key": "evpn_vlan_interfaces", "value": n_gw * n_vtep * 2,
++         "must": ">= 0",
++         "because": "SONiC models an SVI as two config_db keys (interface, and "
++                    "interface|prefix); zero is correct when anycast_gw is off"},
++        {"key": "evpn_max_vni", "value": max((s["vni"] for s in alloc["segments"]),
++                                             default=0),
++         "must": "< 16777216",
++         "because": "VXLAN's VNI field is 24 bits. A VNI past it renders, "
++                    "applies, and is truncated on the wire"},
++    ]
++
++
++def observe(device, model, alloc):
++    """What to read ON THE BOX, and the count it must yield.
++
++    A CONFIG_DB entry proves the config landed, not that it programmed. This is
++    #58 exactly: ZTP wrote a correct config, a delayed container rewrote it 45s
++    later, artifact-vs-intent agreed throughout, and only reading the device
++    caught it. Each entry names a layer BELOW config_db.
++
++    `layer` is the deepest observable one; where an image cannot expose a layer,
++    the honest record is a recorded fidelity limitation, not a check moved up to
++    a layer that always passes.
++    """
++    if not alloc or not _is_vtep(device, {"fabrics": alloc["fabrics"]}):
++        return []
++    n_seg = len(alloc["segments"])
++    # NOT state_db. FEATURE-EXTENSIBILITY §3.6 proposes
++    # "STATE_DB VXLAN_TUNNEL_TABLE|* >= 1" as this table's tier-2 locator.
++    # MEASURED on gpufab-s11 fr-leaf01 2026-07-28 with the tunnel confirmed
++    # programmed into ASIC_DB: STATE_DB holds ZERO VXLAN keys. Its only tunnel
++    # content is TUNNEL_DECAP_TERM_TABLE|IPINIP_TUNNEL|* (53 stock entries).
++    # STATE_DB's VXLAN tables describe REMOTE VTEPs learned through EVPN, so a
++    # correctly programmed local VTEP with no remote peer populates none of
++    # them. A check asserting >= 1 there would have failed on a working tunnel
++    # — the inverse error to the ASIC_DB one below, from the same source, and
++    # both were found only by reading the box.
++    return [
++        {"table": "VXLAN_TUNNEL", "layer": "appl_db",
++         "command": "sonic-db-cli APPL_DB keys 'VXLAN_TUNNEL_TABLE:*' | grep -c .",
++         "min_count": 1,
++         "why": "orchagent publishes the VTEP here once it has built it; "
++                "measured 0 -> 1 by deploy/checks/c4-evpn-vxlan.sh"},
++        {"table": "VXLAN_EVPN_NVO", "layer": "appl_db",
++         "command": "sonic-db-cli APPL_DB keys 'VXLAN_EVPN_NVO_TABLE:*' | grep -c .",
++         "min_count": 1,
++         "why": "the NVO binding reached the app layer; measured 0 -> 1"},
++        {"table": "VXLAN_TUNNEL_MAP", "layer": "appl_db",
++         "command": "sonic-db-cli APPL_DB keys 'VXLAN_TUNNEL_MAP_TABLE:*' "
++                    "| grep -c .",
++         "min_count": n_seg,
++         "why": "one programmed map per segment; fewer means a segment is "
++                "declared and not carried"},
++        # THE DISCRIMINATOR IS THE TYPE, NOT THE OBJECT. MEASURED on
++        # gpufab-s11 fr-leaf01 2026-07-28, with ZERO VXLAN configured:
++        #
++        #   ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL                   1
++        #   ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL_TERM_TABLE_ENTRY 53
++        #
++        # That is the stock IPinIP decap tunnel every SONiC box carries, one
++        # term per peer loopback. FEATURE-EXTENSIBILITY §3.6 proposes
++        # "ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL* >= 1" as this feature's tier-2
++        # locator; that expression returns 54 on an unconfigured switch and
++        # would have PASSED on a fabric with no overlay at all — the signature
++        # defect of this project, reproduced inside the design written to
++        # prevent it. Filter on SAI_TUNNEL_ATTR_TYPE instead, which measured
++        # exactly 0 VXLAN objects on the same baseline.
++        {"table": "VXLAN_TUNNEL", "layer": "asic_db",
++         "command": "for k in $(sonic-db-cli ASIC_DB keys "
++                    "'ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL:*'); do "
++                    "sonic-db-cli ASIC_DB hget \"$k\" SAI_TUNNEL_ATTR_TYPE; "
++                    "done | grep -c SAI_TUNNEL_TYPE_VXLAN",
++         "min_count": 1,
++         "why": "the deepest layer this image exposes: orchagent asked SAI to "
++                "create a tunnel object OF TYPE VXLAN. Counting tunnel objects "
++                "without the type filter counts the stock IPinIP tunnel and "
++                "passes on a box with no overlay"},
++    ]
+--- a/gpufab-platform/tools/fabric_model.py
++++ b/gpufab-platform/tools/fabric_model.py
+@@ -42,6 +42,15 @@
+ HERE = Path(__file__).resolve().parent
+ sys.path.insert(0, str(HERE))
+ import gpufab  # noqa: E402  (switch catalog)
++# Feature modules live BESIDE this file (tools/features/) and are discovered by
++# directory scan. They are imported here rather than in the renderer because
++# declare()/allocate()/applies_to() are model concerns: the model is the only
++# allocator, so the only place a feature's identifiers may be computed is
++# inside derive(). See tools/features/__init__.py for why the package sits in
++# gpufab-platform and not gpufab-network.
++if str(HERE) not in sys.path:
++    sys.path.insert(0, str(HERE))
++import features  # noqa: E402
+ 
+ NODE_CATALOG_FILE = HERE / "node_catalog.yaml"
+ NOS_CATALOG_FILE = HERE / "nos_catalog.yaml"
+@@ -336,6 +345,50 @@
+         return yaml.safe_load(f)["models"]
+ 
+ 
++def declared_features(profile):
++    """The `features:` block, validated against the allow-list and normalised.
++
++    Returns {name: decl} for every feature the profile turns ON, {} when it
++    declares none. Each decl has already been through that module's declare().
++
++    ALLOW-LISTING IS NOT OPTIONAL, and the reason is measured: nothing in the
++    profile path rejects an unknown key. gpufab.load_profile deep-merges over
++    DEFAULTS and copies unknown keys through; validate_profile only runs on the
++    legacy shape; derive() raises only on impossible topologies. So a typo'd
++    `vxlann:` — or `evpnn:` — would be read by every consumer as "no such
++    feature is on", silently, while its author believed the overlay was
++    configured and the fabric rendered without it.
++
++    The allow-list is COMPUTED from tools/features/*.py, never maintained. A new
++    module registers itself by existing; there is no second list to update, so
++    there is no second list to forget.
++    """
++    block = profile.get("features")
++    if block in (None, {}, False):
++        return {}
++    if not isinstance(block, dict):
++        raise ModelError(
++            f"`features:` must be a mapping of feature-name -> settings, got "
++            f"{type(block).__name__}")
++
++    known = features.discover()
++    unknown = [k for k in block if k not in known]
++    if unknown:
++        raise ModelError(
++            f"profile declares unknown feature(s) {sorted(unknown)}. Known "
++            f"features: {list(features.names())} (one file each in "
++            f"tools/features/). An unknown feature name is refused rather than "
++            f"ignored: an ignored one reads as 'off' everywhere while its "
++            f"author believes it is on.")
++
++    out = {}
++    for name, mod in sorted(known.items()):
++        decl = mod.declare(profile, error=ModelError)
++        if decl:
++            out[name] = decl
++    return out
++
++
+ def check_nos_capabilities(nos_key, profile):
+     """A NOS declares what it can express; a profile asking for more fails HERE,
+     named, rather than by deploying a fabric and watching it not converge.
+@@ -368,6 +421,46 @@
+                 f"does not declare `config_mode: {need}`. On SONiC this means "
+                 f"docker_routing_config_mode=split-unified and a rendered frr.conf for "
+                 f"the BGP underlay alongside config_db.")
++
++    # ---- feature capabilities, the same gate one axis out -------------------
++    # A feature module names the capability keys it needs; a NOS that does not
++    # declare all of them TRUE is refused HERE, at derive, on a workstation,
++    # before terraform and before any artifact exists. The alternative is what
++    # bgp_unnumbered cost: rendering an artifact the device silently ignores,
++    # and discovering it by watching a fabric not converge.
++    for fname, decl in declared_features(profile).items():
++        mod = features.discover()[fname]
++        missing = [c for c in mod.REQUIRES if caps.get(c) is not True]
++        if missing:
++            raise ModelError(
++                f"profile enables feature {fname!r}, which requires "
++                f"{list(mod.REQUIRES)}, but nos {nos_key!r} does not declare "
++                f"{missing} true "
++                f"(nos_catalog capabilities: "
++                f"{ {c: caps.get(c) for c in mod.REQUIRES} }). "
++                f"Turn the feature off, or pick a NOS that supports it. "
++                f"A capability absent from the catalog is NOT a capability "
++                f"present and unrecorded — nos_catalog's header requires that "
++                f"anything marked verified was established on the running "
++                f"image by a check under deploy/checks/.")
++        # Second-order, exactly as bgp_unnumbered_requires works: a NOS may
++        # support a capability only through a particular config path. Declaring
++        # the capability true while the profile omits that path renders an
++        # artifact the device silently ignores, which is the failure c2b spent
++        # a lab cycle discovering.
++        for cap in mod.REQUIRES:
++            need = caps.get(f"{cap}_requires")
++            if need and profile.get("config_mode") != need:
++                raise ModelError(
++                    f"nos {nos_key!r} supports {cap!r} (needed by feature "
++                    f"{fname!r}) only via {need!r}, but the profile does not "
++                    f"declare `config_mode: {need}`. On SONiC this means "
++                    f"docker_routing_config_mode=split-unified and a rendered "
++                    f"frr.conf, because config_db cannot express it "
++                    f"({cap}_via_config_db="
++                    f"{caps.get(f'{cap}_via_config_db')!r}). Without it the "
++                    f"overlay would program a dataplane with no control plane "
++                    f"and report success.")
+     return nos[nos_key]
+ 
+ 
+@@ -1024,9 +1117,23 @@
+             net, a_ip, b_ip = addr.p2p_link(0, _pod_idx.get(pid, 0), k)
+             l["p2p"], l["a_ip"], l["b_ip"] = net, a_ip, b_ip
+ 
+-    return {"devices": devices, "nodes": nodes, "links": links, "pods": pods,
+-            "counters": counters, "profile": profile, "fidelity": fidelity_override,
+-            "addressing": addr, "nos": nos_key, "nos_spec": nos}
++    model = {"devices": devices, "nodes": nodes, "links": links, "pods": pods,
++             "counters": counters, "profile": profile, "fidelity": fidelity_override,
++             "addressing": addr, "nos": nos_key, "nos_spec": nos}
++
++    # ---- feature allocation: the LAST thing derive() does -------------------
++    # Last, because allocate() selects devices by fabric and tier and therefore
++    # needs the finished topology. In the model, because the model is the only
++    # allocator: every consumer reads `model["features"]` and none of them
++    # recomputes a VNI. Two allocators for one number is how this project
++    # produced the 32-port PORT table (oob_plan.py:166-169), and #79 is the
++    # same shape one axis over.
++    feats = declared_features(profile)
++    model["features"] = {name: features.discover()[name].allocate(
++                             model, decl, error=ModelError)
++                         for name, decl in feats.items()}
++    model["features_declared"] = feats
++    return model
+ 
+ 
+ # --------------------------------------------------------------------------
+--- a/gpufab-platform/tools/expected.py
++++ b/gpufab-platform/tools/expected.py
+@@ -108,7 +108,8 @@
+ 
+     gpus = sum(int(n.get("gpus") or 0) for n in nodes)
+ 
+-    return {
++    del _CONSTRAINTS_RUNTIME[:]     # re-derived per call; never accumulated
++    out = {
+         "profile": prof.get("name", Path(profile_path).stem),
+         "fidelity": fidelity,
+         # --- what NetBox must hold (the SoT side) ---
+@@ -141,6 +142,13 @@
+                 for n in (l["a"], l["b"]) if n in by_name_dev).values()),
+             default=0),
+         # --- shape ---
++        # How many front-panel ports the PLATFORM actually has. Present so that
++        # max_ports_per_switch has something to be compared AGAINST: for the
++        # life of the project it was printed and never compared, and #56 was a
++        # profile wanting 70 links on a 64-port switch, rendering cleanly and
++        # exiting 0. See CONSTRAINTS below.
++        "platform_ports": fm._switch_ports(
++            prof.get("switch_model", "nvidia-sn5600"), fm.gpufab.load_switch_models()),
+         "gpus": gpus,
+         "switches_by_tier": dict(tiers),
+         "switches_by_fabric": dict(fabrics),
+@@ -148,6 +156,82 @@
+         "links_by_fabric": dict(link_fabrics),
+     }
+ 
++    # ---- feature oracle entries --------------------------------------------
++    # A feature module supplies its own counts AND the constraint each must
++    # satisfy. Merged here rather than special-cased, so a second module costs
++    # nothing in this file. An entry with no `must` is REFUSED: a number
++    # nothing compares is the exact shape of the defect above.
++    for fname, alloc in (m.get("features") or {}).items():
++        mod = fm.features.discover()[fname]
++        for e in mod.expected(m, alloc):
++            for req in ("key", "value", "must", "because"):
++                if not e.get(req) and e.get(req) != 0:
++                    raise ValueError(
++                        f"feature {fname!r} oracle entry {e.get('key')!r} has no "
++                        f"{req!r}. Every entry needs a constraint and a reason; "
++                        f"a number nothing compares is how max_ports_per_switch "
++                        f"printed 70 against a 64-port platform and exited 0.")
++            if e["key"] in out:
++                raise ValueError(
++                    f"feature {fname!r} oracle key {e['key']!r} collides with an "
++                    f"existing key. Two derivations of one number is #79.")
++            out[e["key"]] = e["value"]
++            _CONSTRAINTS_RUNTIME.append((e["key"], e["must"], e["because"], fname))
++    return out
++
++
++# Constraints on the keys this file has always computed. Each is
++# (key, must, because). `must` is evaluated with the expected dict in scope.
++#
++# THIS IS THE LAYER THAT DID NOT EXIST. YANG validates shape; the box proves
++# programming; nothing checked SUFFICIENCY — that a number is valid AND right.
++# `max_ports_per_switch` is the retroactive case and it is not hypothetical:
++# it printed 70 against a 64-port platform and exited 0 for the life of the
++# project, because nothing ever compared it to anything.
++CONSTRAINTS = [
++    ("max_ports_per_switch", "max_ports_per_switch <= platform_ports",
++     "a HWSKU with fewer ports than the busiest switch needs cannot address the "
++     "fabric, and the links past its last port render, apply and never come up (#56)"),
++    ("bgp_peer_series", "bgp_peer_series >= bgp_sessions",
++     "a switch<->switch session is scraped from both ends, so series can never be "
++     "fewer than sessions; if it is, the two quantities have been conflated again"),
++    ("switches", "switches > 0",
++     "a profile deriving no switch is a profile that would deploy nothing and "
++     "report success"),
++]
++
++# Feature-supplied constraints, appended by compute(). Module-level because the
++# consumer is main(), and re-derived on every compute() call.
++_CONSTRAINTS_RUNTIME: list = []
++
++
++def check(exp) -> list:
++    """Every constraint evaluated. Returns the list of violations."""
++    bad = []
++    for key, must, because, *src in CONSTRAINTS + [
++            (k, m, b, f) for k, m, b, f in _CONSTRAINTS_RUNTIME]:
++        ns = {k: v for k, v in exp.items() if isinstance(v, (int, float))}
++        # Two spellings, because the design writes both: an operator-prefix
++        # form ("<= platform_ports", which reads naturally beside the key it
++        # constrains) and a full expression ("a <= b"). The prefix form is
++        # completed with the key it belongs to. Anything else is left alone and
++        # will fail evaluation, which is reported as a violation — an
++        # unevaluatable constraint must never read as a pass.
++        expr = must.strip()
++        if expr[:2] in ("==", "!=", "<=", ">=") or expr[:1] in ("<", ">"):
++            expr = f"{key} {expr}"
++        try:
++            ok = bool(eval(expr, {"__builtins__": {}}, ns))  # noqa: S307
++        except Exception as e:  # noqa: BLE001
++            # A constraint that cannot be evaluated is a FAILURE, never a pass.
++            # A check that measured nothing is the defect, not the baseline.
++            bad.append((key, must, f"constraint could not be evaluated: {e}", because))
++            continue
++        if not ok:
++            got = exp.get(key)
++            bad.append((key, must, f"violated (value {got!r})", because))
++    return bad
++
+ 
+ def main() -> int:
+     ap = argparse.ArgumentParser(description=__doc__,
+@@ -156,6 +240,8 @@
+     ap.add_argument("--fidelity", default="vm")
+     ap.add_argument("--json", action="store_true", help="machine-readable")
+     ap.add_argument("--key", help="print one value and nothing else")
++    ap.add_argument("--check", action="store_true",
++                    help="evaluate every constraint; exit 1 on any violation")
+     args = ap.parse_args()
+ 
+     try:
+@@ -167,6 +253,20 @@
+               f"{type(e).__name__}: {e}", file=sys.stderr)
+         return 1
+ 
++    if args.check:
++        bad = check(exp)
++        n = len(CONSTRAINTS) + len(_CONSTRAINTS_RUNTIME)
++        if n == 0:
++            # A --check that evaluated nothing is a failure, not a clean run.
++            print("expected.py --check: ZERO constraints evaluated — this "
++                  "proves nothing", file=sys.stderr)
++            return 1
++        for key, must, why, because in bad:
++            print(f"expected.py: {key}: {why}\n  must: {must}\n  because: {because}",
++                  file=sys.stderr)
++        print(f"{n - len(bad)}/{n} constraints hold for {exp['profile']}")
++        return 1 if bad else 0
++
+     if args.key:
+         if args.key not in exp:
+             print(f"expected.py: no such key {args.key!r}. "
+--- a/gpufab-platform/tools/nos_catalog.yaml
++++ b/gpufab-platform/tools/nos_catalog.yaml
+@@ -75,6 +75,37 @@
+       frr_split_mode: true                     # docker_routing_config_mode
+       bgp_to_the_host: true
+       ecmp: true
++      # --- overlay, for features.evpn (issue #87) --------------------------
++      # MEASURED on gpufab-s11 fr-leaf01, 2026-07-28, image
++      # vrnetlab/sonic_sonic-vs:202505-ztp, SONiC.202505.0-dirty-20260724.060659,
++      # asic_type vs. Established by deploy/checks/c4-evpn-vxlan.sh, not by
++      # documentation — this file's header requires that.
++      #
++      #   vxlanmgrd RUNNING (pid 141) in swss, beside vlanmgrd/tunnelmgrd/fdbsyncd
++      #   /usr/local/yang-models/sonic-vxlan.yang present, and it declares
++      #     EXACTLY three CONFIG_DB tables: VXLAN_TUNNEL, VXLAN_TUNNEL_MAP,
++      #     VXLAN_EVPN_NVO. So config_db CAN carry the dataplane half — unlike
++      #     BGP_NEIGHBOR, where YANG's inet:ip-address typing refuses it.
++      #   show vxlan tunnel | remotevtep | vlanvnimap  all rc=0 (empty tables)
++      #   vtysh 'show bgp l2vpn evpn summary' rc=0 (FRR 10.3; AFI compiled in)
++      vxlan_dataplane: true
++      vxlan_via_config_db: true       # verified: sonic-vxlan.yang models all 3
++      # THE FIDELITY CEILING, AND IT IS NOT A DEFECT — IT IS THE EMULATOR.
++      # syncd is docker-syncd-vs (libsai_vs), a SOFTWARE dataplane. VXLAN state
++      # programs all the way into ASIC_DB as SAI_TUNNEL_TYPE_VXLAN, and nothing
++      # forwards a VXLAN frame behind it. Any check claiming a packet crossed a
++      # tunnel on this image is measuring the wrong layer; the deepest true
++      # claim is "orchagent asked SAI to build the tunnel".
++      vxlan_forwarding: none          # libsai_vs — state is faithful, forwarding is not
++      evpn_control_plane: true
++      # config_db has NO representation for an l2vpn evpn address family. Same
++      # constraint, same subsystem and same cause as bgp_unnumbered: bgpcfgd is
++      # the translator and the limit, not FRR. So the control-plane half needs
++      # the SECOND artifact this project already renders and stage 55 already
++      # delivers, which means the profile must declare split mode — exactly the
++      # second-order shape bgp_unnumbered_requires established.
++      evpn_control_plane_via_config_db: false
++      evpn_control_plane_requires: frr_split_mode
+ 
+   cumulus:
+     vendor: NVIDIA (Cumulus Linux)
+--- a/gpufab-network/tools/manifest.py
++++ b/gpufab-network/tools/manifest.py
+@@ -93,6 +93,29 @@
+     "BGP_NEIGHBOR": "vtysh:show bgp summary json",
+     "INTERFACE":    "appl_db:INTF_TABLE:*",
+     "PORT":         "appl_db:PORT_TABLE:*",
++    # --- features.evpn (issue #87) ------------------------------------------
++    # MEASURED on gpufab-s11 fr-leaf01, 2026-07-28, all against the UNCONFIGURED
++    # baseline so a later non-zero result means something.
++    "VLAN":             "appl_db:VLAN_TABLE:*",
++    "VLAN_INTERFACE":   "appl_db:INTF_TABLE:Vlan*",
++    "VXLAN_TUNNEL_MAP": "appl_db:VXLAN_TUNNEL_MAP_TABLE:*",
++    "VXLAN_EVPN_NVO":   "vtysh:show bgp l2vpn evpn summary json",
++    # THE TYPE FILTER IS THE WHOLE LOCATOR, and leaving it off would have been
++    # a check that passes on a switch with no overlay. FEATURE-EXTENSIBILITY
++    # §3.6 proposes "ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL* >= 1" for this table.
++    # Measured on the baseline, that expression returns 54:
++    #
++    #   ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL                   1
++    #   ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL_TERM_TABLE_ENTRY 53
++    #
++    # — the stock IPinIP decap tunnel, with one term per peer loopback, present
++    # on every SONiC box before anything is configured. Filtering on
++    # SAI_TUNNEL_ATTR_TYPE gave exactly 0 on the same baseline, which is the
++    # number a locator has to be able to produce before it can prove anything.
++    # This is the first asic_db: locator in the file; the vocabulary is
++    # <db>:<pattern>[attr=value] and the consumer is the feature's observe().
++    "VXLAN_TUNNEL":     "asic_db:ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL:*"
++                        "[SAI_TUNNEL_ATTR_TYPE=SAI_TUNNEL_TYPE_VXLAN]",
+ }
+ 
+ # Tables with no tier-2 locator TODAY, and the reason for each. This list is the
+--- a/gpufab-network/tools/render_fabric_ztp.py
++++ b/gpufab-network/tools/render_fabric_ztp.py
+@@ -46,6 +46,7 @@
+ import gpufab  # noqa: E402  (switch model catalog, for port-name mapping)
+ import interim_deploy as idp  # noqa: E402  (vm_port; auth_tables: AAA/TACPLUS)
+ import manifest  # noqa: E402  (the owned-table manifest, composed as we render)
++import features  # noqa: E402  (declared feature modules; see fabric_model)
+ 
+ MODELS = gpufab.load_switch_models()
+ # A device type may be named EITHER way in the SoT — by the NetBox device-type
+@@ -563,7 +564,8 @@
+ 
+ def device_config(dev, iface_by_id, ip_by_iface, peer, dev_by_id, base,
+                   p2p="numbered", port_sets=None, render_fp=None,
+-                  *, infra_overrides):
++                  *, infra_overrides,
++                  model_features=None, model_devices=None):
+     """Build a full config_db for one switch entirely from NetBox data.
+ 
+     Routing tables come from frr_render.device_intent(), the SAME derivation
+@@ -791,6 +793,35 @@
+         # that was missing.
+         cfg.update(idp.auth_tables(infra["tacacs"]))
+         comp.mark("auth")
++
++    # ---- declared features -------------------------------------------------
++    # One loop, no per-feature branch. A second module costs nothing here: it
++    # is discovered by directory scan, its tables come back as fragments, and
++    # comp.mark() names it as the owner of whatever those fragments changed.
++    # Ownership is therefore COMPUTED by the same pass that does the work —
++    # there is no list of evpn's tables anywhere for someone to keep in step.
++    #
++    # `model` is the derived fabric model, which is where the feature's
++    # identifiers were allocated. It is passed in rather than re-derived here:
++    # re-deriving would be a second allocator, and a VNI computed twice is #79
++    # with a different number.
++    for fname, alloc in sorted((model_features or {}).items()):
++        mod = features.discover()[fname]
++        mdev = (model_devices or {}).get(dev.name)
++        if mdev is None or not mod.applies_to(mdev, None, alloc):
++            continue
++        frag = mod.config_db(mdev, None, alloc)
++        if frag:
++            cfg.update(frag)
++        # A device the feature applies to but contributes no config_db table to
++        # — a frontend SPINE, which carries EVPN in FRR and terminates no
++        # tunnel — still gets marked. Marking a no-op costs nothing and keeps
++        # "this contributor ran here" true; skipping it would make the manifest
++        # silent about a device the feature genuinely governs.
++        comp.mark(fname)
++        stanzas = mod.frr_conf(mdev, None, alloc)
++        if stanzas:
++            frr_conf = (frr_conf or "") + "\n" + "\n".join(stanzas) + "\n"
+     return cfg, mgmt, frr_conf, comp.build(render_fp)
+ 
+ 
+@@ -857,6 +888,32 @@
+     # staleness an input fingerprint is blind to, and that one cost 178 BGP
+     # sessions across three fabrics.
+     rrev = render_revision.render_revision()
++    # Declared features, allocated ONCE by the model. This renderer is
++    # NetBox-driven, so it derives the model purely to read what the profile
++    # declares and what the model allocated — never to recompute it. Same
++    # reason profile_infra_overrides() exists: three numbers that are not in
++    # NetBox, and reading the profile is the only way this file can agree with
++    # everyone else about them (issue #79).
++    _feat_alloc, _feat_devices = {}, {}
++    try:
++        _fm_model = fabric_model.derive(gpufab.load_profile(profile), "vm")
++        _feat_alloc = _fm_model.get("features") or {}
++        _feat_devices = {d["name"]: d for d in _fm_model.get("devices", [])}
++    except Exception as e:  # noqa: BLE001
++        # A profile that declares no feature must still render, and legacy
++        # profiles cannot be derived by fabric_model at all (KeyError: 'fabric').
++        # But a profile that DOES declare one and cannot be derived must not
++        # render silently without it — that is a feature the operator believes
++        # is on, absent from every artifact, with every stage reporting success.
++        _raw = gpufab.load_profile(profile)
++        if (_raw.get("features") or {}):
++            sys.exit(f"render_fabric_ztp: {profile} declares features "
++                     f"{sorted(_raw['features'])} but the model could not be "
++                     f"derived: {type(e).__name__}: {e}. Refusing to render a "
++                     f"fabric that would silently omit a declared feature.")
++    if _feat_alloc:
++        print(f"features: {', '.join(sorted(_feat_alloc))} "
++              f"({sum(len(a.get('vteps', [])) for a in _feat_alloc.values())} vtep device(s))")
+     devices, dev_by_id, iface_by_id, ip_by_iface, peer = read_netbox(nb)
+     switches = [d for d in devices if (d.custom_fields or {}).get("node_class") == "sonic-vm"]
+     reservations = []
+@@ -866,7 +923,9 @@
+                                                 dev_by_id, base, p2p=args.p2p,
+                                                 port_sets=port_sets,
+                                                 render_fp=rrev["fingerprint"],
+-                                                infra_overrides=infra_overrides)
++                                                infra_overrides=infra_overrides,
++                                                model_features=_feat_alloc,
++                                                model_devices=_feat_devices)
+         manifests.append(mf)
+         d = root / dev.name
+         d.mkdir(exist_ok=True)
+--- a/gpufab-network/design/profiles/scale/s1-512.yaml
++++ b/gpufab-network/design/profiles/scale/s1-512.yaml
+@@ -1,5 +1,26 @@
+ name: s1-512
+ nos: sonic
++# The EVPN control plane cannot be expressed in config_db (bgpcfgd is the
++# translator and the limit), so it rides the rendered frr.conf that stage 55
++# already delivers. Declaring it here is what
++# check_nos_capabilities(evpn_control_plane_requires) demands; without it the
++# overlay would program a dataplane with no control plane and report success.
++config_mode: frr_split_mode
++features:
++  evpn:
++    # `fabrics`, not `planes`: "plane" means three unrelated things in this
++    # architecture and only this word means the backend/frontend/storage/oob
++    # axis. The backend is pure L3 by design and by measurement; the frontend
++    # is the one fabric already shaped for L2 (it is the only one declaring
++    # peer_links, for a single-active SVI gateway).
++    fabrics: [frontend]
++    # The two segments design/policy/addressing.yaml has declared since the
++    # beginning under `frontend_vlans`, and which — measured 2026-07-28 — no
++    # code in either repo has ever read.
++    segments:
++      - {name: compute,      vlan: 100, prefix: 10.201.100.0/24}
++      - {name: provisioning, vlan: 200, prefix: 10.201.200.0/24}
++    anycast_gw: true
+ switch_model: nvidia-sn5600
+ oob_switch_model: nvidia-sn5600
+ placement:
+@@ -41,6 +62,12 @@
+     st_leaves: 3
+     st_spines: 2
+     oob_switches: 2
++    # How many overlay segments this fabric may grow to WITHOUT renumbering the
++    # ones already there. Same rule as every other envelope entry: exceeding it
++    # is a named error, never a silent renumber. VNIs are positional on vlan id
++    # (vni = vni_base + vlan), so widening this does NOT renumber — but it is
++    # declared anyway, so growth is a reviewed decision rather than inferred.
++    vni: 64
+     nodes: 76
+     node_classes: {gpu: 64, cpu: 8, storage: 2, head: 1, mgmt: 1}
+ fabric:

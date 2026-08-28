@@ -1,0 +1,24 @@
+dc1-pod001-bk-p2-r8-leaf02
+  BEFORE.json = post-push config, which interim_deploy's own read-back
+                verified equal to intent (config_landed -> ok)
+  AFTER-FIX.json = the box after a cold ZTP re-run with the 00-snmp
+                section present, captured 08:15:09Z, 2m after the
+                docker-snmp container started at 08:13:07Z
+
+  INTERFACE: IDENTICAL (68 keys)
+  LOOPBACK_INTERFACE: IDENTICAL (2 keys)
+  BGP_NEIGHBOR: IDENTICAL (34 keys)
+  AAA: IDENTICAL (1 keys)
+  TACPLUS: IDENTICAL (1 keys)
+  TACPLUS_SERVER: IDENTICAL (1 keys)
+  PORT: IDENTICAL (64 keys)
+  SNMP: IDENTICAL (1 keys)
+  SNMP_COMMUNITY: IDENTICAL (1 keys)
+  DROP tables present on cold box: []
+  MD.hostname: intent='dc1-pod001-bk-p2-r8-leaf02' cold='dc1-pod001-bk-p2-r8-leaf02' SAME
+  MD.bgp_asn: intent='4200000031' cold='4200000031' SAME
+  MD.type: intent='LeafRouter' cold='LeafRouter' SAME
+  MD.hwsku: intent='Accton-AS7816-64X' cold='Accton-AS7816-64X' SAME
+  FEATURE.snmp.state: intent='enabled' cold='enabled'
+
+OWNED TABLES THAT DIFFER: 0   ->  interim_deploy would SKIP this switch (in sync)

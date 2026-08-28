@@ -1,0 +1,4 @@
+
+# Agent worktrees — transient. Embedding a git repo inside this one breaks
+# clones, and `git add -A` sweeps them up. Ignored at the source.
+.claude/worktrees/

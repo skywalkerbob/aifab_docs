@@ -1,0 +1,41 @@
+WARNING: 
+
+To increase the performance of the tunnel, consider installing NumPy. For instructions,
+please see https://cloud.google.com/iap/docs/using-tcp-forwarding#increasing_the_tcp_upload_bandwidth
+
+
+=== dc1-pod001-bk-p1-r1-leaf01 (172.20.0.40) ===
+  table                      artifact        box
+  INTERFACE                        68         68   SAME
+  LOOPBACK_INTERFACE                2          2   SAME
+  BGP_NEIGHBOR                     34         34   SAME
+  AAA                               0          0   SAME
+  TACPLUS                           0          0   SAME
+  TACPLUS_SERVER                    0          0   SAME
+  PORT                             64         64   SAME
+  DROP_TABLES still on box: ['SNMP', 'SNMP_COMMUNITY']
+  DROP_TABLES in artifact : ['SNMP', 'SNMP_COMMUNITY']
+
+=== dc1-pod001-bk-p1-spine01 (172.20.0.72) ===
+  table                      artifact        box
+  INTERFACE                        32         32   SAME
+  LOOPBACK_INTERFACE                2          2   SAME
+  BGP_NEIGHBOR                     16         16   SAME
+  AAA                               0          0   SAME
+  TACPLUS                           0          0   SAME
+  TACPLUS_SERVER                    0          0   SAME
+  PORT                             64         64   SAME
+  DROP_TABLES still on box: ['SNMP', 'SNMP_COMMUNITY']
+  DROP_TABLES in artifact : ['SNMP', 'SNMP_COMMUNITY']
+
+=== dc1-pod001-st-leaf01 (172.20.0.81) ===
+  table                      artifact        box
+  INTERFACE                        96         96   SAME
+  LOOPBACK_INTERFACE                2          2   SAME
+  BGP_NEIGHBOR                     48         48   SAME
+  AAA                               0          0   SAME
+  TACPLUS                           0          0   SAME
+  TACPLUS_SERVER                    0          0   SAME
+  PORT                             64         64   SAME
+  DROP_TABLES still on box: ['SNMP', 'SNMP_COMMUNITY']
+  DROP_TABLES in artifact : ['SNMP', 'SNMP_COMMUNITY']

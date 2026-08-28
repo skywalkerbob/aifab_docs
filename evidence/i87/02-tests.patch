@@ -1,0 +1,531 @@
+--- /dev/null
++++ b/gpufab-platform/tests/t38-vxlan.sh
+@@ -0,0 +1,315 @@
++#!/usr/bin/env bash
++# t38 — features.evpn: declared in the profile, owned by the manifest, gated by
++# the NOS catalog, counted by the oracle, and PROGRAMMED on a device.
++#
++# The last one is the point. A rendered VXLAN tunnel that never programs into
++# ASIC state is indistinguishable from a working one in every artifact-level
++# check — #58 exactly, where ZTP wrote a correct config, a delayed container
++# rewrote it 45s later, artifact-vs-intent agreed throughout, and only reading
++# the device caught it.
++#
++# AND THIS TEST MUST NOT LEAN ON config_landed (#97). config_landed compares
++# `cfg` — which build_switch_config GRAFTS FROM the box — against the box, so
++# both sides derive from one source and an artifact-vs-box divergence is
++# structurally unobservable to it. Worse for this feature specifically: the
++# moment the render declares VXLAN_TUNNEL in manifest.json, ownership() puts it
++# in `owned` and subtracts `owned` out of `strip`, so cfg[VXLAN_TUNNEL] is
++# inherited verbatim from the box and want == got by construction, on every
++# switch, forever. That is a green light that measured nothing. This test
++# compares the ARTIFACT ON DISK against the BOX, like t11 and t33.
++#
++# THE 0/0 TRAP IS THE OTHER HALF. `t_count "label" 0 0` PASSES (lib.sh:30-40
++# fires its measured-nothing guard only when the EXPECTED side is non-zero), and
++# a feature declared off produces exactly 0 expected and 0 observed. So the
++# feature-off arm never asserts a bare zero: it asserts absence with t_zero
++# AND asserts a non-zero count of the things it looked at. t28-oob-routed.sh is
++# the pattern — feature off does not mean skip, it means prove the machinery is
++# absent.
++set -uo pipefail
++cd "$(dirname "$0")" 2>/dev/null || cd /tmp
++source ./lib.sh 2>/dev/null || source /tmp/lib.sh
++T_NAME="t38-vxlan"
++
++GITROOT="${GITROOT:-/opt/gpufab}"
++PLAT="$GITROOT/gpufab-platform"
++NET="$GITROOT/gpufab-network"
++ZTP_ROOT="${ZTP_SRV:-$GITROOT/ztp-srv}"
++SECRETS="$GITROOT/secrets"
++KEY="$SECRETS/automation_ed25519"
++PROFILE="${PROFILE:-$(cat $GITROOT/profile 2>/dev/null)}"
++SAMPLE="${SAMPLE:-3}"
++PY=python3
++
++[ -d "$PLAT/tools" ] || { t_bad "no $PLAT/tools — cannot reach the model"; t_summary; exit; }
++[ -n "$PROFILE" ] && [ -r "$PROFILE" ] || { t_bad "no readable profile ($PROFILE)"; t_summary; exit; }
++
++# ---------------------------------------------------------------------------
++# 1. THE MODEL: allow-list, capability gate, and one derivation of the VNI.
++#    These run wherever the repo is; they need no fabric.
++# ---------------------------------------------------------------------------
++MODEL_OUT=$($PY - "$PLAT/tools" "$PROFILE" <<'PY' 2>&1
++import sys, json, copy, yaml
++sys.path.insert(0, sys.argv[1])
++import fabric_model as fm
++
++prof = yaml.safe_load(open(sys.argv[2]))
++res = {}
++
++
++def raises(p):
++    try:
++        fm.derive(p, "vm")
++        return ""
++    except fm.ModelError as e:
++        return " ".join(str(e).split())[:120]
++    except Exception as e:
++        return f"WRONGTYPE {type(e).__name__}"
++
++
++# An UNKNOWN FEATURE NAME must be a loud error, not a silent no-op. Unknown
++# profile keys are otherwise ignored without complaint, so a typo'd `vxlann:`
++# would read as "off" everywhere while its author believed it was on.
++p = copy.deepcopy(prof)
++p.setdefault("features", {})["vxlann"] = {"segments": [{"name": "x", "vlan": 10}]}
++res["unknown_feature"] = raises(p)
++
++# A NOS that cannot express the feature must fail at DERIVE, not at apply.
++p = copy.deepcopy(prof)
++p.setdefault("features", {})["evpn"] = {
++    "fabrics": ["frontend"],
++    "segments": [{"name": "compute", "vlan": 100, "prefix": "10.201.100.0/24"}]}
++p["nos"] = "arista_eos"
++res["nos_gate"] = raises(p)
++
++# An unknown key INSIDE a known feature's block, same rule one level down.
++p = copy.deepcopy(prof)
++p.setdefault("features", {})["evpn"] = {
++    "segments": [{"name": "c", "vlan": 100, "prefix": "10.201.100.0/24"}],
++    "segement": []}
++res["unknown_key"] = raises(p)
++
++# The OOB fabric has no routed underlay; a VTEP there is impossible, not merely
++# unwise. (backend must stay PERMITTED — a simulator reproduces the unwise.)
++p = copy.deepcopy(prof)
++p.setdefault("features", {})["evpn"] = {
++    "fabrics": ["oob"],
++    "segments": [{"name": "c", "vlan": 100, "prefix": "10.201.100.0/24"}]}
++res["oob_refused"] = raises(p)
++
++# Is the feature ON in the profile this fabric was actually built from?
++m = fm.derive(copy.deepcopy(prof), "vm")
++alloc = (m.get("features") or {}).get("evpn") or {}
++res["enabled"] = 1 if alloc else 0
++res["devices"] = len(m["devices"])
++res["vteps"] = sorted(alloc.get("vteps", []))
++res["segments"] = len(alloc.get("segments", []))
++res["vnis"] = [s["vni"] for s in alloc.get("segments", [])]
++
++# ONE DERIVATION. Recompute the VNI the only other way anyone could, and demand
++# the model already agrees — two derivations of one number is #79, and it has
++# taken this fabric down three times.
++if alloc:
++    base = alloc["vni_base"]
++    res["vni_agrees"] = int(all(s["vni"] == base + s["vlan"] for s in alloc["segments"]))
++    # The VTEP source must BE the device's loopback, not a recomputation of it.
++    ev = fm.features.discover()["evpn"]
++    byname = {d["name"]: d for d in m["devices"]}
++    ok = 1
++    for v in alloc["vteps"]:
++        frag = ev.config_db(byname[v], m, alloc)
++        if frag.get("VXLAN_TUNNEL", {}).get("vtep", {}).get("src_ip") != byname[v]["loopback"]:
++            ok = 0
++    res["vtep_src_referenced"] = ok
++print(json.dumps(res))
++PY
++)
++MODEL_JSON=$(printf '%s' "$MODEL_OUT" | tail -1)
++jqv() { printf '%s' "$MODEL_JSON" | $PY -c "import json,sys
++try: print(json.load(sys.stdin).get('$1',''))
++except Exception: print('')" 2>/dev/null; }
++
++case "$MODEL_JSON" in
++  \{*) : ;;
++  *) t_bad "model probe produced no JSON — the assertions below cannot run: ${MODEL_OUT:0:200}"
++     t_summary; exit;;
++esac
++
++for c in unknown_feature nos_gate unknown_key oob_refused; do
++  msg=$(jqv "$c")
++  if [ -z "$msg" ]; then
++    t_bad "$c: derive() ACCEPTED it — this must be a named error, not a silent no-op"
++  elif [ "${msg#WRONGTYPE}" != "$msg" ]; then
++    t_bad "$c: raised $msg, not ModelError"
++  else
++    t_ok "$c refused at derive: ${msg:0:90}"
++  fi
++done
++
++ENABLED=$(jqv enabled); N_DEV=$(jqv devices)
++t_min "devices in the derived model" "${N_DEV:-0}" 1
++
++# ---------------------------------------------------------------------------
++# 2. THE ARTIFACTS. Feature off => zero VXLAN tables across a NON-ZERO number
++#    of artifacts. Feature on  => the tables, and the manifest owning them.
++# ---------------------------------------------------------------------------
++n_art=$(find -L "$ZTP_ROOT" -mindepth 2 -maxdepth 2 -name config_db.json 2>/dev/null | wc -l)
++n_man=$(find -L "$ZTP_ROOT" -mindepth 2 -maxdepth 2 -name manifest.json 2>/dev/null | wc -l)
++t_min   "rendered switch artifacts present" "$n_art" 1
++t_count "artifacts carrying an owned-table manifest" "$n_man" "$n_art"
++
++ART=$(sudo $PY - "$ZTP_ROOT" <<'PY' 2>/dev/null
++import json, os, sys
++root = sys.argv[1]
++VX = ("VXLAN_TUNNEL", "VXLAN_TUNNEL_MAP", "VXLAN_EVPN_NVO", "VLAN", "VLAN_INTERFACE")
++n_cfg = with_vx = owned_vx = 0
++for d in sorted(os.listdir(root)):
++    f = os.path.join(root, d, "config_db.json")
++    if not os.path.exists(f):
++        continue
++    n_cfg += 1
++    cfg = json.load(open(f))
++    if any(cfg.get(t) for t in VX):
++        with_vx += 1
++    m = os.path.join(root, d, "manifest.json")
++    if os.path.exists(m):
++        tabs = json.load(open(m)).get("tables", {})
++        if any(tabs.get(t, {}).get("owner") == "evpn" for t in VX):
++            owned_vx += 1
++print(f"{n_cfg} {with_vx} {owned_vx}")
++PY
++)
++read -r A_CFG A_VX A_OWNED <<<"${ART:-}"
++t_min "artifacts inspected for overlay tables" "${A_CFG:-0}" 1
++
++if [ "${ENABLED:-0}" = "0" ]; then
++  # FEATURE OFF. Not a skip: assert the machinery is ABSENT, having looked at a
++  # provably non-zero number of artifacts. A bare t_count 0 0 would pass here
++  # having measured nothing, which is the exact trap this arm exists to avoid.
++  t_zero "artifacts carrying VXLAN tables with the feature off" "${A_VX:-}"
++  t_zero "manifests claiming evpn ownership with the feature off" "${A_OWNED:-}"
++  t_ok   "feature off: ${A_CFG} artifacts inspected, none carries an overlay"
++else
++  N_VTEP=$(jqv vteps | tr -d "[]'" | tr ',' '\n' | grep -c .)
++  N_SEG=$(jqv segments)
++  t_min   "VTEPs selected by the model" "${N_VTEP:-0}" 1
++  t_count "artifacts carrying VXLAN tables" "${A_VX:-0}" "${N_VTEP:-0}"
++  t_count "manifests recording evpn as owner" "${A_OWNED:-0}" "${N_VTEP:-0}"
++  t_eq    "VNI derived in exactly one place" "$(jqv vni_agrees)" "1"
++  t_eq    "VTEP src_ip REFERENCES the model loopback" "$(jqv vtep_src_referenced)" "1"
++
++  # The oracle must know what to count, and every count must have a constraint.
++  EXP="$PLAT/tools/expected.py"
++  for k in evpn_vteps evpn_segments evpn_tunnel_maps; do
++    v=$($PY "$EXP" --profile "$PROFILE" --key "$k" 2>/dev/null)
++    case "$v" in ''|*[!0-9]*) t_bad "oracle key $k produced '$v' — not a count";;
++                 *) t_ok "oracle $k = $v";; esac
++  done
++  if $PY "$EXP" --profile "$PROFILE" --check >/dev/null 2>&1; then
++    t_ok "expected.py --check: every constraint holds"
++  else
++    t_bad "expected.py --check reported a violation"
++  fi
++fi
++
++# ---------------------------------------------------------------------------
++# 3. THE BOX. Artifact-on-disk vs device, then the layer BELOW config_db.
++# ---------------------------------------------------------------------------
++if [ ! -r "$KEY" ]; then
++  t_bad "no automation key at $KEY — the device arm cannot run, and a test that
++        cannot reach the box proves nothing about programming"
++  t_summary; exit
++fi
++_SSHO=(-n -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
++       -o LogLevel=ERROR -o ConnectTimeout=25 -o BatchMode=yes
++       -o PasswordAuthentication=no)
++sw() { ssh -i "$KEY" "${_SSHO[@]}" "admin@$1" "$2" 2>/dev/null; }
++
++# `sonic-db-cli keys` PRINTS A NEWLINE ON NO MATCH, so `wc -l` returns 1 for an
++# empty result and every presence test passes before anything exists. MEASURED
++# on gpufab-s11: `sonic-db-cli CONFIG_DB keys 'ZZZ*' | od -c` -> `\n`.
++# grep -c . is the only counter that reports 0. (grep -c also EXITS 1 on no
++# match; the value is captured, never used under set -e.)
++dbcount() { sw "$1" "sonic-db-cli $2 keys '$3' | grep -c ." | tr -d '\r' | tail -1; }
++
++mapfile -t ROWS < <(sudo $PY - "$ZTP_ROOT" <<'PY' 2>/dev/null
++import json, os, sys
++root = sys.argv[1]
++for d in sorted(os.listdir(root)):
++    f = os.path.join(root, d, "config_db.json")
++    try:
++        cfg = json.load(open(f))
++    except Exception:
++        continue
++    mgmt = ""
++    for k in cfg.get("MGMT_INTERFACE", {}):
++        if "|" in k:
++            mgmt = k.split("|", 1)[1].split("/")[0]
++            break
++    if not mgmt:
++        continue
++    print(f"{mgmt}\t{d}\t{len(cfg.get('VXLAN_TUNNEL', {}))}\t{len(cfg.get('VXLAN_TUNNEL_MAP', {}))}")
++PY
++)
++t_min "artifacts with a mgmt address" "${#ROWS[@]}" 1
++
++checked=0; mismatched=0; unreachable=0; programmed=0
++for row in "${ROWS[@]:0:$SAMPLE}"; do
++  IFS=$'\t' read -r ip name want_t want_m <<<"$row"
++  [ -n "$ip" ] || continue
++  got_t=$(dbcount "$ip" CONFIG_DB 'VXLAN_TUNNEL|*')
++  case "$got_t" in
++    ''|*[!0-9]*) unreachable=$((unreachable+1))
++                 t_bad "$name ($ip): produced '${got_t:-<empty>}', not a count — unreachable"
++                 continue;;
++  esac
++  checked=$((checked+1))
++  # ARTIFACT vs BOX. Not config_landed (#97): both of its sides come from the
++  # box, so it cannot see this divergence at all.
++  if [ "${got_t:-0}" -ne "${want_t:-0}" ]; then
++    mismatched=$((mismatched+1))
++    t_bad "$name ($ip): artifact declares $want_t VXLAN_TUNNEL, box has $got_t"
++  fi
++  if [ "${want_t:-0}" -gt 0 ]; then
++    # PROGRAMMED, not merely present. The type filter is the whole assertion:
++    # MEASURED on an unconfigured fr-leaf01, ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL
++    # already holds 1 object and SAI_OBJECT_TYPE_TUNNEL_TERM_TABLE_ENTRY holds
++    # 53 — the stock IPinIP decap tunnel. Counting tunnel objects without
++    # filtering on SAI_TUNNEL_ATTR_TYPE returns 54 on a switch with no overlay
++    # and would pass. Filtering gave exactly 0 on that baseline and 1 once a
++    # tunnel was programmed (deploy/checks/c4-evpn-vxlan.sh).
++    asic=$(sw "$ip" "for k in \$(sonic-db-cli ASIC_DB keys 'ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL:*'); do sonic-db-cli ASIC_DB hget \"\$k\" SAI_TUNNEL_ATTR_TYPE; done | grep -c SAI_TUNNEL_TYPE_VXLAN" | tr -d '\r' | tail -1)
++    appl=$(dbcount "$ip" APPL_DB 'VXLAN_TUNNEL_TABLE:*')
++    if [ "${asic:-0}" -ge 1 ] && [ "${appl:-0}" -ge 1 ]; then
++      programmed=$((programmed+1))
++      t_ok "$name: tunnel PROGRAMMED (appl_db=$appl, asic_db vxlan-typed=$asic)"
++    else
++      t_bad "$name: config_db has the tunnel but it never programmed (appl_db=${appl:-?}, asic_db vxlan-typed=${asic:-?}) — this is #58"
++    fi
++  fi
++done
++
++# Guarded by $checked, never reported bare: "0 mismatches out of 0 comparisons"
++# is the measured-nothing pass this suite exists to eliminate.
++if [ "${checked:-0}" -eq 0 ]; then
++  t_bad "UNVERIFIED: 0 switches compared, so 0 mismatches proves nothing"
++else
++  t_ok  "switches compared artifact-vs-box: $checked"
++  t_zero "switches whose overlay config differs from its artifact" "$mismatched"
++fi
++t_zero "switches unreachable during comparison" "$unreachable"
++
++if [ "${ENABLED:-0}" = "1" ]; then
++  t_min "switches with a PROGRAMMED VXLAN tunnel" "${programmed:-0}" 1
++else
++  # Feature off: nothing may be programmed, and we must have looked.
++  t_zero "switches with a programmed tunnel while the feature is off" "${programmed:-0}"
++fi
++
++# The fabric must be exactly as converged as the oracle says, always.
++WANT_BGP=$($PY "$PLAT/tools/expected.py" --profile "$PROFILE" --key bgp_peer_series 2>/dev/null)
++GOT_BGP=$(curl -s --max-time 20 "${EXPORTER:-http://127.0.0.1:9101/metrics}" 2>/dev/null \
++          | grep -c '^gpufab_bgp_peer_up{')
++case "$WANT_BGP" in ''|*[!0-9]*) t_bad "oracle gave no bgp_peer_series ('$WANT_BGP')";;
++  *) t_count "BGP peer series (unchanged by the overlay)" "${GOT_BGP:-0}" "$WANT_BGP";; esac
++
++t_summary
+--- a/gpufab-platform/tests/verify.sh
++++ b/gpufab-platform/tests/verify.sh
+@@ -291,6 +291,14 @@
+ # in #58 ZTP wrote a correct config, a `delayed` container rewrote it 45 seconds
+ # later, and artifact-vs-intent agreed throughout.
+ run_host_phase gitops-rt    ssh_h "$FABRIC_HOST" "$HERE/t33-gitops-roundtrip.sh"
++# features.evpn (#87) — the first DECLARED feature module. Host-side and after
++# `applied` for the same reason as gitops-rt, plus one specific to this feature:
++# config_landed cannot judge it. The moment the render declares VXLAN_TUNNEL in
++# the manifest, ownership() subtracts it out of `strip` and the push inherits
++# the box's own value, so want == got by construction on every switch forever
++# (#97). t38 compares the ARTIFACT against the box, and then reads a layer
++# below config_db to prove the tunnel actually programmed.
++run_host_phase vxlan        ssh_h "$FABRIC_HOST" "$HERE/t38-vxlan.sh"
+ # SNMP, which the fabric RUNS with a derived community rather than suppresses.
+ # Host-side and after `applied` for a reason: the property is not "the push
+ # landed" — the old code satisfied that for the eleven seconds before the snmp
+--- /dev/null
++++ b/gpufab-platform/deploy/checks/c4-evpn-vxlan.sh
+@@ -0,0 +1,193 @@
++#!/usr/bin/env bash
++# Checkpoint C4: does a VXLAN tunnel actually PROGRAM on this image, or does
++# config_db merely accept it?
++#
++# This is the question that decides whether features.evpn (#87) is a real
++# feature or a decorative one, and it is #58's exact shape: a rendered artifact
++# that never reaches the dataplane is indistinguishable from a working one in
++# every artifact-level check. FEATURE-EXTENSIBILITY §5.6 says the module's first
++# deliverable is not code, it is this probe.
++#
++# It answers, on ONE live leaf:
++#   1. does the CLI/config_db path accept VXLAN_TUNNEL + VXLAN_TUNNEL_MAP?
++#   2. does orchagent publish the VTEP into APPL_DB? (NOT state_db — measured
++#      empty on a tunnel that is provably programmed; see the pass criteria)
++#   3. does anything appear in ASIC_DB under SAI_OBJECT_TYPE_TUNNEL *of type
++#      VXLAN* — the type filter is the whole check, see BASELINE below
++#   4. does the fleet's BGP count survive it?
++#
++# WHY IT DOES NOT USE `config reload`: a reload drops the switch's sessions and
++# this fabric is a converged specimen that costs a 21-minute rebuild. The
++# `config vxlan` CLI writes CONFIG_DB live, vxlanmgrd reacts to the write, and
++# `config vxlan del` reverses it. One switch of 48, no reload, reversible.
++#
++# BASELINE MEASURED on gpufab-s11 fr-leaf01 2026-07-28, BEFORE anything ran:
++#   ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL                    1
++#   ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL_TERM_TABLE_ENTRY  53
++# — the stock IPinIP decap tunnel. So "a SAI tunnel exists" is a FALSE POSITIVE
++# on an unconfigured box, and FEATURE-EXTENSIBILITY §3.6's proposed locator
++# (SAI_OBJECT_TYPE_TUNNEL* >= 1) would have passed on a fabric with no overlay.
++# The discriminator is SAI_TUNNEL_ATTR_TYPE == SAI_TUNNEL_TYPE_VXLAN, which
++# measured exactly 0 on that baseline.
++#
++# Usage: c4-evpn-vxlan.sh [--switch <mgmt-ip>] [--keep]
++# Exit:  0 = the tunnel programmed to the deepest layer this image exposes
++#        1 = it did not; features.evpn must record the limitation, and
++#            nos_catalog.capabilities.vxlan_dataplane must not say true
++set -uo pipefail
++
++SW_IP="${SW_IP:-172.20.0.76}"          # dc1-pod001-fr-leaf01, a frontend leaf
++KEEP=0
++while [ $# -gt 0 ]; do
++  case "$1" in
++    --switch) SW_IP="$2"; shift 2;;
++    --keep)   KEEP=1; shift;;
++    *) echo "unknown arg: $1" >&2; exit 2;;
++  esac
++done
++
++VLAN=100
++VNI=10100
++VTEP=vtep
++NVO=nvo
++KEY=/opt/gpufab/secrets/automation_ed25519
++EXPORTER="${EXPORTER:-http://127.0.0.1:9101/metrics}"
++
++LOG() { printf '  %s\n' "$*"; }
++FAIL() { printf '  FAIL: %s\n' "$*" >&2; exit 1; }
++
++[ -r "$KEY" ] || FAIL "no automation key at $KEY — run this on the fabric host"
++
++SW() {  # SW <cmd> -> stdout; rc preserved
++  ssh -n -i "$KEY" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
++      -o LogLevel=ERROR -o ConnectTimeout=25 -o PasswordAuthentication=no \
++      -o BatchMode=yes "admin@$SW_IP" "$1" 2>&1
++}
++
++# `sonic-db-cli keys` PRINTS A NEWLINE ON NO MATCH, so `wc -l` returns 1 for an
++# empty result and every "is it there yet" test passes before anything exists.
++# MEASURED: `sonic-db-cli CONFIG_DB keys 'ZZZ*' | od -c` -> `\n`. grep -c . is
++# the only counter that reports 0 here. (grep -c also EXITS 1 on no match, so
++# it is used only where the value is captured, never under `set -e`.)
++count_keys() {  # count_keys <DB> <pattern>
++  SW "sonic-db-cli $1 keys '$2' | grep -c ." | tr -d '\r' | tail -1
++}
++
++# The type filter IS the check. Without it this returns 54 on a clean box.
++count_vxlan_asic() {
++  SW "for k in \$(sonic-db-cli ASIC_DB keys 'ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL:*'); do \
++        sonic-db-cli ASIC_DB hget \"\$k\" SAI_TUNNEL_ATTR_TYPE; \
++      done | grep -c SAI_TUNNEL_TYPE_VXLAN" | tr -d '\r' | tail -1
++}
++
++bgp_series() {  # fleet-wide, from the exporter — the number that must not move
++  curl -s --max-time 20 "$EXPORTER" 2>/dev/null \
++    | grep -c '^gpufab_bgp_peer_up{' || true
++}
++bgp_up() {
++  curl -s --max-time 20 "$EXPORTER" 2>/dev/null \
++    | awk '/^gpufab_bgp_peer_up\{/ {s+=$2} END {printf "%d", s+0}'
++}
++
++cleanup() {
++  if [ "$KEEP" = 1 ]; then LOG "--keep: leaving VXLAN on $SW_IP"; return; fi
++  LOG "removing the probe's config from $SW_IP"
++  SW "sudo config vxlan map del $VTEP $VLAN $VNI" >/dev/null 2>&1
++  SW "sudo config vxlan evpn_nvo del $NVO"        >/dev/null 2>&1
++  SW "sudo config vxlan del $VTEP"                >/dev/null 2>&1
++  SW "sudo config vlan del $VLAN"                 >/dev/null 2>&1
++  local left; left="$(count_keys CONFIG_DB '*VXLAN*')"
++  LOG "  CONFIG_DB VXLAN keys after cleanup: ${left:-?} (must be 0)"
++}
++trap cleanup EXIT
++
++echo "=============== C4 / does VXLAN program on this image? ==============="
++LOG "target switch: $SW_IP"
++SRC="$(SW "sonic-db-cli CONFIG_DB hget 'LOOPBACK_INTERFACE|Loopback0' NULL >/dev/null; \
++           sonic-db-cli CONFIG_DB keys 'LOOPBACK_INTERFACE|*' | grep '/' | head -1" \
++      | tr -d '\r' | sed 's#.*|##; s#/.*##')"
++[ -n "$SRC" ] || FAIL "could not read Loopback0 from the switch"
++LOG "VTEP source (the device's own Loopback0, referenced not computed): $SRC"
++
++# ---- baselines. A later non-zero means nothing without these. --------------
++B_CFG="$(count_keys CONFIG_DB '*VXLAN*')"
++B_STA="$(count_keys STATE_DB  'VXLAN_TUNNEL_TABLE|*')"
++B_APP="$(count_keys APPL_DB   'VXLAN*')"
++B_ASIC="$(count_vxlan_asic)"
++B_SERIES="$(bgp_series)"; B_UP="$(bgp_up)"
++LOG "BASELINE  config_db=$B_CFG  state_db=$B_STA  appl_db=$B_APP  asic_db(vxlan)=$B_ASIC"
++LOG "BASELINE  bgp series=$B_SERIES up=$B_UP"
++for v in "$B_CFG" "$B_STA" "$B_APP" "$B_ASIC"; do
++  case "$v" in ''|*[!0-9]*) FAIL "a baseline did not produce a count ('$v') — the probe did not run";; esac
++done
++[ "$B_ASIC" = "0" ] || FAIL "baseline already has $B_ASIC VXLAN tunnels in ASIC_DB — not a clean control"
++[ "${B_SERIES:-0}" -gt 0 ] || FAIL "exporter reported no BGP series — cannot prove the fabric survived"
++
++# ---- apply, via the CLI, live ----------------------------------------------
++LOG "applying: vlan $VLAN, vtep $VTEP src $SRC, nvo, map $VLAN->$VNI"
++LOG "  config vlan add:      $(SW "sudo config vlan add $VLAN" | tail -1)"
++LOG "  config vxlan add:     $(SW "sudo config vxlan add $VTEP $SRC" | tail -1)"
++LOG "  config vxlan nvo add: $(SW "sudo config vxlan evpn_nvo add $NVO $VTEP" | tail -1)"
++LOG "  config vxlan map add: $(SW "sudo config vxlan map add $VTEP $VLAN $VNI" | tail -1)"
++
++A_CFG="$(count_keys CONFIG_DB '*VXLAN*')"
++LOG "config_db VXLAN keys after apply: $A_CFG (baseline $B_CFG)"
++if [ "${A_CFG:-0}" -le "${B_CFG:-0}" ]; then
++  LOG "config_db did not accept the tables at all — CLI output above is the diagnostic"
++  SW "sonic-db-cli CONFIG_DB keys '*VXLAN*'"
++  echo "====================================================================="
++  echo "VERDICT: config_db does NOT carry VXLAN on this image."
++  exit 1
++fi
++
++# ---- did it PROGRAM? poll, because vxlanmgrd is asynchronous ---------------
++A_STA=0; A_APP=0; A_ASIC=0
++for _ in $(seq 1 12); do
++  sleep 5
++  A_STA="$(count_keys STATE_DB 'VXLAN_TUNNEL_TABLE|*')"
++  A_APP="$(count_keys APPL_DB  'VXLAN*')"
++  A_ASIC="$(count_vxlan_asic)"
++  # Break on APPL_DB + ASIC_DB, NOT on STATE_DB — see the pass criteria below.
++  [ "${A_ASIC:-0}" -ge 1 ] && [ "${A_APP:-0}" -ge 1 ] && break
++done
++LOG "AFTER     config_db=$A_CFG  state_db=$A_STA  appl_db=$A_APP  asic_db(vxlan)=$A_ASIC"
++# The exact key NAMES, because a locator written from a guess is a locator that
++# measures the wrong thing. These are what manifest.VERIFY_LOCATORS must match.
++LOG "CONFIG_DB keys:"; SW "sonic-db-cli CONFIG_DB keys '*VXLAN*'" | sed 's/^/      /'
++LOG "APPL_DB keys:";   SW "sonic-db-cli APPL_DB keys '*VXLAN*'"   | sed 's/^/      /'
++LOG "STATE_DB keys:";  SW "sonic-db-cli STATE_DB keys '*VXLAN*'; sonic-db-cli STATE_DB keys '*TUNNEL*'" | sed 's/^/      /'
++LOG "show vxlan tunnel:"; SW "show vxlan tunnel" | sed 's/^/      /'
++LOG "show vxlan vlanvnimap:"; SW "show vxlan vlanvnimap" | sed 's/^/      /'
++if [ "${A_ASIC:-0}" -ge 1 ]; then
++  LOG "ASIC_DB VXLAN tunnel object:"
++  SW "for k in \$(sonic-db-cli ASIC_DB keys 'ASIC_STATE:SAI_OBJECT_TYPE_TUNNEL:*'); do \
++        t=\$(sonic-db-cli ASIC_DB hget \"\$k\" SAI_TUNNEL_ATTR_TYPE); \
++        [ \"\$t\" = SAI_TUNNEL_TYPE_VXLAN ] && echo \"\$k -> \$t\"; done" | sed 's/^/      /'
++fi
++
++# ---- the fabric must be unharmed -------------------------------------------
++A_SERIES="$(bgp_series)"; A_UP="$(bgp_up)"
++LOG "BGP after: series=$A_SERIES up=$A_UP (baseline series=$B_SERIES up=$B_UP)"
++
++echo "====================================================================="
++RC=0
++# STATE_DB is DELIBERATELY NOT A PASS CONDITION. Measured on a tunnel proven
++# programmed into ASIC_DB: STATE_DB holds zero VXLAN keys, because its VXLAN
++# tables describe REMOTE VTEPs learned via EVPN and this probe brings up one
++# local VTEP with no peer. Requiring it would fail a working tunnel.
++[ "${A_APP:-0}" -ge 1 ] || { echo "APPL_DB:   no VXLAN tables — orchagent never published the VTEP"; RC=1; }
++[ "${A_ASIC:-0}" -ge 1 ] || { echo "ASIC_DB:   no SAI_TUNNEL_TYPE_VXLAN object — accepted, never programmed"; RC=1; }
++[ "${A_SERIES:-0}" = "${B_SERIES:-x}" ] || { echo "BGP:       series moved $B_SERIES -> $A_SERIES"; RC=1; }
++[ "${A_UP:-0}" = "${B_UP:-x}" ]         || { echo "BGP:       up moved $B_UP -> $A_UP"; RC=1; }
++if [ "$RC" = 0 ]; then
++  echo "VERDICT: VXLAN PROGRAMS on this image, to ASIC_DB, and the fabric is intact."
++  echo "  nos_catalog: vxlan_dataplane: true, vxlan_via_config_db: true"
++  echo "  NOTE the ceiling: syncd is docker-syncd-vs (libsai_vs), a SOFTWARE"
++  echo "  dataplane. This proves orchagent asked SAI to build the tunnel. It"
++  echo "  does NOT prove a frame crossed one, and no check on this image can."
++else
++  echo "VERDICT: NOT fully programmed. features.evpn must record the limitation"
++  echo "  and verify at the deepest layer that IS observable — never pass on"
++  echo "  config_db alone and call it working."
++fi
++exit "$RC"

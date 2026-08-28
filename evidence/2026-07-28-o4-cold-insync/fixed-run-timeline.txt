@@ -1,0 +1,93 @@
+dc1-pod001-bk-p2-r8-leaf02 (172.20.0.71) — the SAME leaf, ZTP re-run twice.
+Both runs start by restoring /etc/sonic/snmp.yml to the image default, which is
+what a genuinely cold switch boots with (read off oob-sw01, never pushed):
+
+    printf "snmp_rocommunity: public\nsnmp_location: public\n" | sudo tee /etc/sonic/snmp.yml
+    sudo config ztp run -y
+
+then `sudo sonic-cfggen -d --print-data` + `sudo cat /etc/sonic/snmp.yml` every 20s.
+
+================================================================================
+RUN 1 — renderer AS SHIPPED (ztp.json carries only 01-configdb-json)
+`config ztp run -y` at 07:56:10 UTC
+================================================================================
+
+  07:56:49  tables=18  SNMP_COMMUNITY=[]                            yml=public
+  07:57:10  tables=18  SNMP_COMMUNITY=[]                            yml=public
+  07:57:30  tables=19  SNMP_COMMUNITY=['public']                    yml=public
+  07:57:51  tables=28  SNMP_COMMUNITY=['258426a9ab2818d668db1ec6a778533a']
+  07:58:14  tables=28  SNMP_COMMUNITY=['258426a9ab2818d668db1ec6a778533a']
+  07:58:35  tables=28  SNMP_COMMUNITY=['258426a9ab2818d668db1ec6a778533a','public']
+  ...      (stays at two communities)
+
+  ZTP applied the config at 07:57:51 and docker-snmp put `public` back 44s later.
+  Stage 50 settles 90s after the last switch fetches, so every switch in a real
+  build carries `public` before interim_deploy reads it.
+
+================================================================================
+RUN 2 — renderer WITH THE FIX (ztp.json carries 00-snmp + 01-configdb-json)
+`config ztp run -y` at 08:10:53 UTC
+================================================================================
+
+  starting state (broken, from run 1):
+  08:10:35  tables=28  SNMP_COMMUNITY=['258426a9...','public']       yml=public
+  08:10:55  tables=28  SNMP_COMMUNITY=['258426a9...','public']       yml=public
+
+  08:11:16  tables=17  SNMP_COMMUNITY=[]                             yml=public
+  08:11:38  tables=18  SNMP_COMMUNITY=[]                             yml=public
+  08:12:01  tables=18  SNMP_COMMUNITY=[]                             yml=public
+  08:12:21  tables=19  SNMP_COMMUNITY=['258426a9ab2818d668db1ec6a778533a']
+                       yml=[snmp_rocommunity: 258426a9ab2818d668db1ec6a778533a |
+                            snmp_location: dc1-pod001-bk-p2-r8-leaf02]
+  08:12:42  tables=28  SNMP_COMMUNITY=['258426a9ab2818d668db1ec6a778533a']
+  08:13:04  tables=28  SNMP_COMMUNITY=['258426a9ab2818d668db1ec6a778533a']
+  08:13:25  tables=28  SNMP_COMMUNITY=['258426a9ab2818d668db1ec6a778533a']
+
+  The 00-snmp section wrote snmp.yml BEFORE the config landed (08:12:21, while
+  the DB was still mid-provision at 19 tables). The docker-snmp container then
+  restarted after the reload —
+
+      sudo docker inspect -f {{.State.StartedAt}} snmp
+      2026-07-28T08:13:07.759135871Z
+
+  — and added NOTHING, because snmp_yml_to_configdb.py found the community in
+  snmp.yml already present in the DB. `public` never reappears. Compare run 1,
+  where the equivalent container start added it.
+
+      sudo sonic-db-cli CONFIG_DB keys "SNMP_COMMUNITY|*"
+      SNMP_COMMUNITY|258426a9ab2818d668db1ec6a778533a          (one key, ours)
+
+ZTP's own verdict on run 2, both sections, in order:
+
+    admin@172.20.0.71:~$ show ztp status
+    ZTP Admin Mode : True
+    ZTP Service    : Inactive
+    ZTP Status     : SUCCESS
+    ZTP Source     : dhcp-opt67 (eth0)
+    Runtime        : 01m 53s
+    Timestamp      : 2026-07-28 08:12:46 UTC
+
+    ZTP Service is not running
+
+    00-snmp: SUCCESS
+    01-configdb-json: SUCCESS
+
+The ztp.json the fixed renderer produced for this device, from NetBox on the
+host (`render_fabric_ztp.py --root /opt/gpufab/ztp-srv --server 172.20.0.4`):
+
+    {
+     "ztp": {
+      "01-configdb-json": {
+       "url": {"source": "http://172.20.0.4/dc1-pod001-bk-p2-r8-leaf02/config_db.json"},
+       "clear-config": true
+      },
+      "00-snmp": {
+       "community-ro": "258426a9ab2818d668db1ec6a778533a",
+       "snmp-location": "dc1-pod001-bk-p2-r8-leaf02",
+       "restart-agent": false
+      }
+     }
+    }
+
+`00-snmp` sorts first, which is what makes it run first; the JSON key order in
+the file is irrelevant (ZTPSections sorts).
