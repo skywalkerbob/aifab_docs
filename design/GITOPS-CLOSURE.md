@@ -217,14 +217,43 @@ But per correction 4, **there is no working runner today**, and the label
 `render.yml` now requires exists on no runner in the account. Before a commit can
 trigger anything:
 
+> **UPDATE 2026-08-31 — no longer true.** A self-hosted runner
+> `gpufab-gpufab-ops-01` is registered to `skywalkerbob/aifab_network` and PROVEN
+> consuming: a `workflow_dispatch` of `runner-selftest.yml` ran on it with the
+> job's own output reporting `hostname=gpufab-ops-01`. It carries the
+> `sim-gpufab-ops-01` label `render.yml` routes on. Items 1 and 3 below are done;
+> 2 and 4 are not.
+
 1. `gpufab-gh-runner-token` must be declared in terraform. It is declared in no
    terraform resource (`FEATURE-EXTENSIBILITY.md:825-831`), and
    `setup_runner.sh:42` reads it from Secret Manager.
+
+   > **UPDATE 2026-08-31 — DONE, with one distinction worth keeping.** The
+   > *IAM binding* is now declared as
+   > `google_secret_manager_secret_iam_member.gh_runner_token_accessor` in
+   > `gpufab-platform/terraform/secrets.tf`, and **applied**: `1 added,
+   > 0 changed, 0 destroyed`, live policy verified to match the plan. The secret
+   > *container* is still deliberately **not** declared — `tools/up.sh` creates it
+   > on first publish, and adopting an existing container is a state operation
+   > that deserves its own change rather than riding along with an IAM fix.
+   >
+   > The binding had been absent entirely, not merely undeclared: the head's
+   > compute SA could not read the secret, so registration failed. Because
+   > `setup_runner.sh` reports the generic "no GitHub runner registration token",
+   > it presented as a MISSING TOKEN rather than a permission error.
 2. Stage 90 must stop degrading silently on runner failure, or health must stop
    treating the runner as `optional: true` — one of the two, not neither.
 3. `vars.SIM_IDS` must be set, or every schedule-driven path stays a no-op. The
    07-28 nightly render failed with **0 jobs and 0s wall** for exactly this
    reason; repo Actions variables today contain only `NETBOX_URL`.
+
+   > **UPDATE 2026-08-31 — DONE.** `vars.SIM_IDS` is set to `["gpufab-ops-01"]`
+   > on `skywalkerbob/aifab_network` (the GitOps repo since 2026-08-30). The
+   > matrix now resolves: a dispatched render created a real job
+   > `render (gpufab-ops-01)` on runner `gpufab-gpufab-ops-01`, where it had
+   > previously failed in 0-2s having created **zero** jobs. It is an Actions
+   > repository variable, so it is still not terraform-managed — this terraform
+   > does not manage GitHub.
 4. `t22-review-regressions.sh:354-355` asserts "stage 90 requires relay AND bot
    AND runner" against a line that names only relay and bot. It has passed under
    a false name since `1a092e6` and is the only thing in the suite that claims to
@@ -843,6 +872,10 @@ on `design/**`, sharing `deploy.yml`'s concurrency group plus a host lock.
 stage 90's silent degradation, `vars.SIM_IDS`, and the `t22` assertion that has
 never measured the runner. None is large; all four are prerequisites, and the
 first is the hard one because it is a secret nothing declares.
+
+> **UPDATE 2026-08-31 — two of the four are done.** The runner-token IAM binding
+> is declared and applied, and `vars.SIM_IDS` is set. Still open: stage 90's
+> silent degradation, and the `t22` assertion that has never measured the runner.
 
 *Makes possible:* commit → NetBox, for the first time. *Still broken:*
 NetBox → device still requires `deploy.yml`'s apply, which is still a stub, and

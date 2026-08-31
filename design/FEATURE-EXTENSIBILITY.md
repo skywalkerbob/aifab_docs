@@ -827,6 +827,18 @@ Three of the four workflows have exactly one commit each:
 - The nightly render is a no-op: its matrix falls back to `fromJSON(vars.SIM_IDS || '[]')`
   and **`SIM_IDS` is provisioned by nothing** in terraform.
 
+  > **UPDATE 2026-08-31 — both fixed.** `drift-check.yml` now runs
+  > `/opt/gpufab-venv/bin/python tools/drift.py --root /srv/ztp`, sources this sim's own
+  > `netbox-runner.env`, and maps drift.py's exit codes explicitly (0 clean / 1 device
+  > drift / 2 render stale / anything else = a broken check, which is not a clean fabric).
+  > Confirmed on the record: in the old repo every scheduled run was *cancelled at 24h*
+  > with `runner_name: ""` — they expired in the queue and never executed, so the bug was
+  > always there and giving the repo a working runner merely EXPOSED it.
+  >
+  > `vars.SIM_IDS` is now set to `["gpufab-ops-01"]`. It remains provisioned by nothing in
+  > terraform, and that phrasing is still literally correct — it is a GitHub Actions
+  > repository variable, which this terraform does not manage.
+
 **And upstream of NetBox there is no arc at all.** `seed.py` is invoked from exactly one
 place — `deploy/30-seed.sh` — which runs only inside `deploy.sh`. No workflow, no relay,
 no bot ever calls it. **A profile change committed to git never reaches the SoT until a
@@ -846,7 +858,23 @@ One more thing worth knowing before planning against it: **the Actions runner is
 not registered on `gpufab-s11`.** `setup_runner.sh` needs a registration token from Secret
 Manager `gpufab-gh-runner-token`, and **no terraform resource declares that secret**. Stage
 90 is in `NONFATAL`, the stage degrades rather than fails, and health treats the runner as
-`optional: true` — so a build that never registered it reports healthy. Determining this
+`optional: true` — so a build that never registered it reports healthy.
+
+> **UPDATE 2026-08-31.** The *IAM binding* on `gpufab-gh-runner-token` is now declared
+> (`terraform/secrets.tf`, `google_secret_manager_secret_iam_member.gh_runner_token_accessor`)
+> and applied — `1 added, 0 changed, 0 destroyed`, live policy verified against the plan.
+> The sentence above stays true of the secret **container**, which is deliberately still
+> undeclared: `tools/up.sh` creates it on first publish, and adopting it is a state
+> operation deserving its own change.
+>
+> The stronger finding is that the binding was **absent, not merely undeclared** — the
+> head's compute service account held no `secretAccessor` at all, so the read failed and
+> the runner could not register. This was measured, not inferred, on `gpufab-ops-01`
+> 2026-08-30, together with a second cause: `/home/ubuntu/.config` was `root:root`, so
+> gcloud failed for the runner user regardless of IAM. Both were hidden behind
+> `setup_runner.sh`'s generic "no GitHub runner registration token". A runner is now
+> registered and proven consuming on that host. The "degrades and still reports healthy"
+> criticism is untouched by any of this and still stands. Determining this
 takes one `systemctl is-active gpufab-runner`, and by doctrine that belongs in a committed
 test, not an ad-hoc SSH.
 
@@ -937,6 +965,9 @@ honest about what is a design and what is a repair:
 - `render.py` writes **no `_provenance.json`**, so the GitOps path is the one path whose
   artifacts cannot say which SoT and which code produced them.
 - `vars.SIM_IDS` and the `gpufab-gh-runner-token` secret are declared in no terraform.
+  > **UPDATE 2026-08-31.** The runner-token **IAM binding** is now declared and applied;
+  > the secret **container** is still undeclared by design. `vars.SIM_IDS` is now SET, but
+  > as an Actions repository variable — still not terraform-managed. See §6.1.
 - `t22:354-355` asserts "R9 stage 90 requires relay AND bot AND runner" against a line
   that names only relay and bot. It has passed under a false name since `1a092e6`, and it
   is the only thing in the suite that claims to cover the runner.
