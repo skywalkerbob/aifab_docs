@@ -1,6 +1,6 @@
 # Multi-host fabric — the design for blocker 1
 
-Status: **NOT APPROVED, rev 5.** Not authorized for implementation. This is a
+Status: **NOT APPROVED, rev 6.** Not authorized for implementation. This is a
 problem statement, not a plan: it records what is built, what is not, and what
 must be settled before anything is.
 
@@ -27,10 +27,20 @@ Review history, all findings verified against the sources before acceptance:
   contract tested success at both encapsulations but an adjacent failure at only
   one, so the tenant-overlay boundary was never actually located (§7).
 
-The recurring shape in all twelve: something that **names** a fact standing in
+- **rev 5 → rev 6**, three closure-contract gaps. Rev 5 EXCLUDED
+  `.gpufab-source` from the digest while naming it as the cause of false
+  provenance, so the closure could match with provenance still wrong; its object
+  rules allowed only `f|l` and refused everything else, which refuses every
+  repository, since all contain directories; and it refused only symlinks
+  escaping the root, when hashing the target *string* also lets an in-root link
+  point at an excluded mutable file (§6).
+
+The recurring shape in all fifteen: something that **names** a fact standing in
 for something that **measures** it — an intent for a measurement, a question for
-a decision, a distant failure for an adjacent one. Rev 3 and rev 4 each
-reproduced that shape while fixing earlier instances of it.
+a decision, a distant failure for an adjacent one, an exclusion for the very file
+under suspicion. Revs 3, 4 and 5 each reproduced that shape while fixing earlier
+instances of it, which is the strongest argument in this document for why the
+contract has to be written down rather than held in someone's head.
 
 Scope: what S1→S2 needs to run one fabric across two hosts. It does **not**
 design the S1→S2 migration (step 4) or authorize any change to the live pair.
@@ -327,26 +337,62 @@ TAB, terminated by NUL:
     <relpath> \t <type> \t <mode> \t <digest>
 
     relpath   POSIX-relative to the repo root, raw bytes
-    type      f (regular file) | l (symlink)
-    mode      execution-relevant bits ONLY: 100755 / 100644 for f, 120000 for l
-    digest    f: SHA-256 of the file bytes
-              l: SHA-256 of the TARGET STRING -- never of what it resolves to
+    type      f (regular file) | d (directory) | l (symlink)
+    mode      execution-relevant bits ONLY:
+                f  100755 / 100644
+                d  040755 / 040750   -- traversal and write permission are
+                                        execution-relevant: a group-writable
+                                        directory lets content be replaced
+                                        without any recorded file changing
+                l  120000
+    digest    f  SHA-256 of the file bytes
+              d  the literal "-"  -- a directory has no content of its own; its
+                                     contents are the records of its children
+              l  SHA-256 of the TARGET STRING, never of what it resolves to
+
+`d` records exist because an earlier revision said "one record per object",
+allowed only `f|l`, and refused everything else — which refuses every repository,
+since all of them contain directories. Recording them also closes the permission
+question in the same structure rather than in a second mechanism.
 
 **Closure digest** = SHA-256 over those records concatenated, sorted by `relpath`
 as **raw bytes** — not locale-collated, because a collation change would move the
 digest without moving a single file.
 
-**Rejections, not omissions.** Any object that is not `f` or `l` — device,
-socket, FIFO, gitlink/submodule — is a REFUSAL, and so is a symlink whose target
-escapes the repository root. Skipping them would let the unrepresentable become
-invisible.
+**Rejections, not omissions.** Any object that is not `f`, `d` or `l` — device,
+socket, FIFO, gitlink/submodule — is a REFUSAL. Skipping them would let the
+unrepresentable become invisible.
 
-**Exclusions are an enumerated allowlist frozen in R** (`.git`, `__pycache__`,
-`.gpufab-source`, …). Everything not excluded is INCLUDED — **including files the
-manifest did not expect.** An untracked import is a change to what executes, and
-this repo has a live instance: `.gpufab-source` is untracked, survives
-`checkout --force`, and is currently causing every git build to misreport its own
-provenance (§6 above).
+**A symlink must RESOLVE, not merely stay in-root.** Refusing only targets that
+escape the root is insufficient: because the record hashes the target *string*, a
+link pointing at an excluded, mutable file has a stable digest while what it
+reaches changes freely. So an included symlink must resolve, through a **finite
+chain** (bounded hops, no cycles), to an object that is itself **in-root and
+included**. A link to an excluded path, a dangling link, or a cycle is a REFUSAL.
+
+**Exclusions are an enumerated allowlist frozen in R** (`.git`, `__pycache__`, …).
+Everything not excluded is INCLUDED — **including files the manifest did not
+expect.** An untracked import is a change to what executes.
+
+**`.gpufab-source` is NOT excluded — it is bound separately.** An earlier
+revision listed it as an exclusion while simultaneously naming it as the cause of
+false provenance, which is self-defeating: the closure would match while the
+provenance it certifies stayed wrong. Every `code_*` field is derived from this
+one file by `_code_stamp()` (`deploy/lib.sh:476-480`), whose own comment records
+that *"a plain origin/main build stamps nothing, code_source is git"*. So:
+
+    git deployment    (code_source=git)   .gpufab-source must be ABSENT.
+                                          Its presence is a REFUSAL -- that is
+                                          exactly today's live defect, where a
+                                          stale stamp survives checkout --force
+                                          and every git build reports itself as
+                                          a synced build from a commit it did
+                                          not run (§6 above).
+    sync deployment   (code_source=sync)  its content is AUTHENTICATED against R,
+                                          which carries the expected stamp.
+
+Binding it this way makes the file's own state part of the identity instead of a
+hole in it.
 
 **Mode is not cosmetic here**, and the repo says so in three places:
 `tools/sync_branch.sh:15` ships a tar of the working tree rather than
