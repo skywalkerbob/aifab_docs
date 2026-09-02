@@ -1,6 +1,6 @@
 # Multi-host fabric — the design for blocker 1
 
-Status: **NOT APPROVED, rev 4.** Not authorized for implementation. This is a
+Status: **NOT APPROVED, rev 5.** Not authorized for implementation. This is a
 problem statement, not a plan: it records what is built, what is not, and what
 must be settled before anything is.
 
@@ -20,10 +20,17 @@ Review history, all findings verified against the sources before acceptance:
   settled the arithmetic (§7). Its digest requirement said "the same expression
   `sync_branch` uses", which is MD5 over a policy-dependent tar, and left the
   measuring code inside the tree it authenticates (§6).
+- **rev 4 → rev 5**, two contract gaps. Rev 4's closure digest listed the
+  questions to answer ("which paths", "modes and symlinks") instead of answering
+  them, so two implementations could produce incompatible digests and a
+  mode/symlink/untracked change could pass a content check (§6). And its MTU
+  contract tested success at both encapsulations but an adjacent failure at only
+  one, so the tenant-overlay boundary was never actually located (§7).
 
-The recurring shape in all ten: something that **names** a fact standing in for
-something that **measures** it. Rev 3 reproduced that shape twice while fixing
-three instances of it.
+The recurring shape in all twelve: something that **names** a fact standing in
+for something that **measures** it — an intent for a measurement, a question for
+a decision, a distant failure for an adjacent one. Rev 3 and rev 4 each
+reproduced that shape while fixing earlier instances of it.
 
 Scope: what S1→S2 needs to run one fabric across two hosts. It does **not**
 design the S1→S2 migration (step 4) or authorize any change to the live pair.
@@ -311,11 +318,43 @@ contents depend on the exclusion flags in force at the time. The live host's
 `code_tree b9b8eaac7e32ccf4843830b9bdf8f2f5` is 128-bit, confirming it. A digest
 whose recipe can drift is not an identity. R therefore pins:
 
-    algorithm    SHA-256
-    inclusions   which paths are covered
-    exclusions   .git, caches, generated artifacts -- enumerated, not implied
-    ordering     canonical sort, so two hosts cannot disagree by traversal order
-    normalisation what is done about modes and symlinks
+those were questions, not decisions, and two implementations answering them
+differently produce incompatible digests. The contract is:
+
+**Canonical record.** One line per object under the repository root, joined by
+TAB, terminated by NUL:
+
+    <relpath> \t <type> \t <mode> \t <digest>
+
+    relpath   POSIX-relative to the repo root, raw bytes
+    type      f (regular file) | l (symlink)
+    mode      execution-relevant bits ONLY: 100755 / 100644 for f, 120000 for l
+    digest    f: SHA-256 of the file bytes
+              l: SHA-256 of the TARGET STRING -- never of what it resolves to
+
+**Closure digest** = SHA-256 over those records concatenated, sorted by `relpath`
+as **raw bytes** — not locale-collated, because a collation change would move the
+digest without moving a single file.
+
+**Rejections, not omissions.** Any object that is not `f` or `l` — device,
+socket, FIFO, gitlink/submodule — is a REFUSAL, and so is a symlink whose target
+escapes the repository root. Skipping them would let the unrepresentable become
+invisible.
+
+**Exclusions are an enumerated allowlist frozen in R** (`.git`, `__pycache__`,
+`.gpufab-source`, …). Everything not excluded is INCLUDED — **including files the
+manifest did not expect.** An untracked import is a change to what executes, and
+this repo has a live instance: `.gpufab-source` is untracked, survives
+`checkout --force`, and is currently causing every git build to misreport its own
+provenance (§6 above).
+
+**Mode is not cosmetic here**, and the repo says so in three places:
+`tools/sync_branch.sh:15` ships a tar of the working tree rather than
+`git archive` precisely because *"git archive ships mode 644 and strips the exec
+bits"*, and `deploy/97-fleet-watchdog.sh:103,175` guard the same trap;
+`bot/setup_automation.sh:86` is the `chmod +x` those bits come from. A tree with
+byte-identical content and wrong modes executes differently, so a content-only
+digest would certify it as correct.
 
 **And the measuring routine must not come from the tree being measured.** A
 digest computed by a script inside the checkout it is authenticating is circular:
@@ -400,13 +439,21 @@ missing prerequisite is a STOP, not a footnote.
 
    The acceptance contract is therefore four assertions, not one:
 
-   - **8846 with DF succeeds** on the wire across the cut;
-   - **8796 with DF succeeds** for overlay-encapsulated payload — the figure that
-     actually governs tenant traffic;
-   - **8847 / 9100 with DF produce the expected PMTUD behaviour** — ICMP
-     "fragmentation needed" naming the true ceiling, and MSS clamping where the
-     path requires it. Silent blackholing of large flows is the classic
-     production failure this must reproduce rather than avoid;
+   Each encapsulation gets its OWN success and its OWN **adjacent** failure. A
+   success at 8796 paired only with a failure at 9100 proves nothing about where
+   the second boundary actually is — it could lie anywhere in 8797..9099, and
+   Stage B would pass without ever testing the encapsulation it exists to
+   qualify:
+
+   | layer | succeeds | adjacent failure, must report ceiling |
+   |---|---|---|
+   | substrate (wire across the cut) | **8846** DF | **8847** -> ICMP frag-needed naming **8846** |
+   | tenant overlay (payload) | **8796** DF | **8797** -> ICMP frag-needed naming **8796** |
+
+   `9100` is retained as a far-above-limit case, not as the boundary test. MSS
+   clamping is asserted where the path requires it. Silent blackholing of large
+   flows is the classic production failure this must reproduce rather than
+   avoid;
    - **local links retain their measured MTU** — 9100 switch port, 9500 host
      veth, which `tests/t58-mtu-headroom.sh` already asserts (measured local
      overlay headroom 350 bytes). A proof that quietly lowered intra-pod MTU to
