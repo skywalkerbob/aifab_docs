@@ -1,6 +1,6 @@
 # Multi-host fabric — the design for blocker 1
 
-Status: **NOT APPROVED, rev 7.** Not authorized for implementation. This is a
+Status: **NOT APPROVED, rev 8.** Not authorized for implementation. This is a
 problem statement, not a plan: it records what is built, what is not, and what
 must be settled before anything is.
 
@@ -44,7 +44,14 @@ Review history, all findings verified against the sources before acceptance:
   `expected_stamp`. Rev 6's encoder was also not uniquely implementable; five
   details are now pinned (§6).
 
-The recurring shape in all seventeen: something that **names** a fact standing in
+- **rev 7 → rev 8**, one self-caught inversion. Rev 2 resolved the `NODE_RAM_GB`
+  contradiction in favour of `fabric.tf`'s 0.34 because it carried the fuller
+  narrative, and every host figure since was sized from it. Measured on the live
+  fabric: 0.036 GB/node, and only `fabric_model`'s 0.029 reconciles with the
+  host's actual 216 GB. The better-argued source was the wrong one — which is the
+  document's own thesis turned on itself (§2).
+
+The recurring shape in all eighteen: something that **names** a fact standing in
 for something that **measures** it — an intent for a measurement, a question for
 a decision, a distant failure for an adjacent one, an exclusion for the very file
 under suspicion. Revs 3, 4 and 5 each reproduced that shape while fixing earlier
@@ -73,30 +80,43 @@ was not measured, it says so.
 
 ## 2. Placement is decided by machine type, not by sizing
 
-### The RAM model contradicts itself — fix this first
+### The RAM model contradicted itself — RESOLVED BY MEASUREMENT
 
 Two committed "measured" values for one fact:
 
     fabric_model.py:182   NODE_RAM_GB = 0.029    # measured: a host container is ~29 MB
     fabric.tf:18-24       76 host nodes x 0.34 GB = 26 GB   <- never counted
 
-They differ by 12x. `fabric.tf` carries the fuller account — it corrects an
-earlier estimate that counted switch VMs only, and lands S1 at 224 GB of 251
-usable, 89%. Rev 1 of this document used the model's 0.029 and therefore
-under-sized every host in it.
+Rev 2 of this document treated `fabric.tf` as authoritative because it carried
+the fuller narrative, and sized every host from 0.34. **That was wrong.**
+Measured on `gpufab-fabric-01` 2026-09-02, summing `docker stats` across the live
+S1 fabric: **75 host-node containers, 2819.89 MiB total, mean 0.036 GB/node.**
 
-**This is a one-derivation violation and it must be resolved before any sizing
-rests on either number.** Until it is, every placement figure here is provisional.
+Reconciled against the host's actual 216 GB in use (48 switches + 76 nodes):
+
+    fabric_model 0.029  ->  48x4.12 + 76x0.029 + 12 = 212.0 GB   matches
+    measured     0.036  ->  48x4.12 + 76x0.036 + 12 = 212.5 GB   matches
+    fabric.tf    0.34   ->  48x4.12 + 76x0.34  + 12 = 235.6 GB   off by 20 GB
+
+`fabric_model.py` is right and `fabric.tf`'s 0.34 is wrong — it does not
+reconcile with the machine it claims to describe. **`fabric.tf:18-24` should be
+corrected**; until it is, the one-derivation violation persists in the direction
+opposite to the one rev 2 assumed.
 
 ### Neither machine currently yields a valid two-host S2
 
-Recomputed with `fabric.tf`'s 0.34 GB/node:
+Recomputed with the MEASURED 0.036 GB/node and 4.12 GB/switch:
 
-| | switches | nodes | total | usable | |
-|---|---|---|---|---|---|
-| S2 shard on `n2-highmem-32` @4.00 GB/sw | 53 | 76 | 249.8 GB | 251 | **99.5%** |
-| S2 shard on `n2-highmem-32` @4.12 GB/sw (measured) | 53 | 76 | 256.2 GB | 251 | **102.1% — over** |
-| S2 shard on `n2-highmem-64` | 53 | 76 | ~250 GB | 495 | ~51% |
+| | total | usable | |
+|---|---|---|---|
+| S2 shard on `n2-highmem-32` | 233.1 GB | 251 | **92.9%** |
+| S2 shard on `n2-highmem-64` | 233.1 GB | 495 | **47.1%** |
+
+An `n2-highmem-32` shard therefore **fits** — rev 2 claimed it was over capacity,
+which was an artefact of the wrong node figure. But 92.9% is worse than the 89%
+that `fabric.tf` itself rejects in prose as *"not headroom — one page-cache spike
+away from the OOM killer choosing a QEMU."* Fitting and being safe are different
+claims, and only the first is true here.
 
 And the placement the model derives depends on which machine is declared:
 
@@ -596,7 +616,10 @@ Only after Stage B does step 6 (rebuild live S1) become answerable.
 
 ## 8. Decisions needed
 
-1. **Resolve `NODE_RAM_GB` 0.029 vs 0.34.** Everything in §2 depends on it.
+1. ~~**Resolve `NODE_RAM_GB` 0.029 vs 0.34.**~~ **ANSWERED by measurement (§2):**
+   0.036 GB/node measured across the live fabric; `fabric_model`'s 0.029
+   reconciles with the host, `fabric.tf`'s 0.34 does not. Remaining action is to
+   correct `fabric.tf:18-24`, which is a code change and not authorized here.
 2. **Choose the machine and pin the placement.** Neither current option yields a
    valid two-host S2; a one-pod-per-host constraint is required either way.
 3. **Settle UDP 4789 vs 14789** between `gen_topology.py` and
