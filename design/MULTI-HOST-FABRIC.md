@@ -1,6 +1,6 @@
 # Multi-host fabric — the design for blocker 1
 
-Status: **NOT APPROVED, rev 6.** Not authorized for implementation. This is a
+Status: **NOT APPROVED, rev 7.** Not authorized for implementation. This is a
 problem statement, not a plan: it records what is built, what is not, and what
 must be settled before anything is.
 
@@ -35,7 +35,16 @@ Review history, all findings verified against the sources before acceptance:
   escaping the root, when hashing the target *string* also lets an in-root link
   point at an excluded mutable file (§6).
 
-The recurring shape in all fifteen: something that **names** a fact standing in
+- **rev 6 → rev 7**, one contradiction and one specification gap. Rev 6 made
+  `.gpufab-source` plain-included, which no sync deployment can satisfy: the
+  stamp carries per-run `synced`/`from` fields, so the reviewed digest would move
+  every run — and it branched on the observed `code_source`, which is derived
+  from the stamp's own presence, letting the artifact under authentication choose
+  its rule. R now carries `source_tree_digest` / `delivery_kind` /
+  `expected_stamp`. Rev 6's encoder was also not uniquely implementable; five
+  details are now pinned (§6).
+
+The recurring shape in all seventeen: something that **names** a fact standing in
 for something that **measures** it — an intent for a measurement, a question for
 a decision, a distant failure for an adjacent one, an exclusion for the very file
 under suspicion. Revs 3, 4 and 5 each reproduced that shape while fixing earlier
@@ -269,11 +278,21 @@ placement, or the same code.
 
 **Required: a frozen manifest R**, computed once and bound to every result:
 
-    R = { host map            physical names and addresses, not derived per host
-          unit set            which pods/tiers exist and which host owns each
-          placement           the device -> host assignment itself
+    R = { host map              physical names and addresses, not derived per host
+          unit set              which pods/tiers exist and which host owns each
+          placement             the device -> host assignment itself
           profile/SoT fingerprint
-          code closure        the reviewed CONTENT DIGEST of each repository }
+
+          -- the code closure, three bindings rather than one --
+          source_tree_digest    reviewed CONTENT DIGEST of each repository,
+                                omitting .gpufab-source (bound below)
+          delivery_kind         git | sync, SUPPLIED BY THE LAUNCHER
+          expected_stamp        sync only: the stamp's invariant fields }
+
+The closure is three fields, not one, because a single digest cannot express
+both "these bytes" and "delivered this way" — and the delivery kind must come
+from outside the host, or the artifact under test selects its own rule. The
+encoder and both bindings are pinned below.
 
 **A commit id is intent; a content digest is evidence.** An earlier draft defined
 the code closure as "the commit every host actually ran" and asked each host to
@@ -371,28 +390,75 @@ chain** (bounded hops, no cycles), to an object that is itself **in-root and
 included**. A link to an excluded path, a dangling link, or a cycle is a REFUSAL.
 
 **Exclusions are an enumerated allowlist frozen in R** (`.git`, `__pycache__`, …).
-Everything not excluded is INCLUDED — **including files the manifest did not
-expect.** An untracked import is a change to what executes.
+Matching is by **exact root-relative path, or the subtree rooted at one** — `X`
+excludes `X` and everything beneath `X/`. No globs, no basename matching, no
+regular expressions: glob semantics differ between implementations, which is the
+whole failure being avoided. An excluded subtree is **not traversed** and yields
+no records. Everything not excluded is INCLUDED, **including files the manifest
+did not expect** — an untracked import is a change to what executes.
 
-**`.gpufab-source` is NOT excluded — it is bound separately.** An earlier
-revision listed it as an exclusion while simultaneously naming it as the cause of
-false provenance, which is self-defeating: the closure would match while the
-provenance it certifies stayed wrong. Every `code_*` field is derived from this
-one file by `_code_stamp()` (`deploy/lib.sh:476-480`), whose own comment records
-that *"a plain origin/main build stamps nothing, code_source is git"*. So:
+### `.gpufab-source` — a separately bound metadata exception
 
-    git deployment    (code_source=git)   .gpufab-source must be ABSENT.
-                                          Its presence is a REFUSAL -- that is
-                                          exactly today's live defect, where a
-                                          stale stamp survives checkout --force
-                                          and every git build reports itself as
-                                          a synced build from a commit it did
-                                          not run (§6 above).
-    sync deployment   (code_source=sync)  its content is AUTHENTICATED against R,
-                                          which carries the expected stamp.
+An earlier revision excluded it while naming it as the cause of false provenance;
+the revision after that made it plain-included, which cannot work either. The
+stamp carries **per-run** fields — `synced=$(date -u …)` and
+`from=$(hostname)@$(id -un)` (`tools/sync_branch.sh:197-199`) — so including it in
+the reviewed tree digest would move that digest on every single run and no
+reviewed value could ever match.
 
-Binding it this way makes the file's own state part of the identity instead of a
-hole in it.
+Worse, the rule cannot be selected by the observed `code_source`: that field is
+derived from the stamp's own presence (`_code_stamp()`, `lib.sh:476-480`), so the
+file under authentication would be choosing the rule that authenticates it. That
+is circular.
+
+So R carries **two** bindings, and the deployment kind is authoritative rather
+than observed:
+
+    R.source_tree_digest   the closure over the tree, with .gpufab-source OMITTED
+                           under this named exception -- an exception, not a
+                           silent exclusion: it is bound below instead
+    R.delivery_kind        git | sync. SUPPLIED BY THE LAUNCHER, never inferred
+                           from anything on the host
+    R.expected_stamp       for delivery_kind=sync only: the stamp's INVARIANT
+                           fields (repo, branch, sha, tree, files) and their
+                           expected values
+
+The host branches on `R.delivery_kind`, never on observed `code_source`:
+
+    delivery_kind = git    .gpufab-source must be ABSENT. Its presence is a
+                           REFUSAL -- which is exactly today's live defect, where
+                           a stale stamp survives checkout --force and every git
+                           build reports itself as a synced build from a commit
+                           it did not run (§6 above).
+    delivery_kind = sync   the stamp's INVARIANT fields must equal
+                           R.expected_stamp. The per-run fields (synced, from)
+                           are RECORDED AS OBSERVED and never compared -- they
+                           are evidence about the run, not part of the identity.
+
+A mismatch between `R.delivery_kind` and what the host actually finds is itself a
+refusal, and it is the check that catches the stale stamp. Binding it this way
+makes the file's own state part of the identity instead of a hole in it.
+
+### The encoder, pinned
+
+Five details decide whether two conforming implementations agree. They are
+decisions, not preferences:
+
+1. **The repository root gets a `d` record** with `relpath` exactly `.`. One
+   mechanism, and the root's mode is as execution-relevant as any other
+   directory's.
+2. **Modes must match the enumerated values EXACTLY; they are never normalised.**
+   Anything else is a REFUSAL. Normalisation is what would hide the finding —
+   folding `100777` into `100755` conceals a world-writable script, which is
+   precisely the class of change this digest exists to catch.
+3. **Digest encoding**: exactly **64 lowercase hexadecimal characters** for `f`
+   and `l`; the single ASCII byte `-` (0x2D) for `d`. No uppercase, no prefix, no
+   truncation.
+4. **Symlink hop limit is 8.** Exceeding it is a REFUSAL, as are cycles and
+   dangling links.
+5. **Symlink resolution is evaluated AFTER exclusions**, so "resolves to an
+   included object" is well defined and a link into an excluded subtree refuses
+   rather than silently passing.
 
 **Mode is not cosmetic here**, and the repo says so in three places:
 `tools/sync_branch.sh:15` ships a tar of the working tree rather than
