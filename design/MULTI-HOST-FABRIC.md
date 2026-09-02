@@ -292,7 +292,7 @@ placement, or the same code.
 The closure is three fields, not one, because a single digest cannot express
 both "these bytes" and "delivered this way" — and the delivery kind must come
 from outside the host, or the artifact under test selects its own rule. The
-encoder and both bindings are pinned below.
+encoder and all three bindings are pinned below.
 
 **A commit id is intent; a content digest is evidence.** An earlier draft defined
 the code closure as "the commit every host actually ran" and asked each host to
@@ -411,8 +411,8 @@ derived from the stamp's own presence (`_code_stamp()`, `lib.sh:476-480`), so th
 file under authentication would be choosing the rule that authenticates it. That
 is circular.
 
-So R carries **two** bindings, and the deployment kind is authoritative rather
-than observed:
+So R carries **three** closure bindings, and the deployment kind is
+authoritative rather than observed:
 
     R.source_tree_digest   the closure over the tree, with .gpufab-source OMITTED
                            under this named exception -- an exception, not a
