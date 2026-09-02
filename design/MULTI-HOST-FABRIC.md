@@ -1,14 +1,22 @@
 # Multi-host fabric — the design for blocker 1
 
-Status: **REJECTED AT REVIEW, rev 2.** Not approved, not authorized for
-implementation. Five blockers were raised against rev 1; all five were verified
-against the sources and are recorded below with what was measured.
+Status: **NOT APPROVED, rev 3.** Not authorized for implementation. This is a
+problem statement, not a plan: it records what is built, what is not, and what
+must be settled before anything is.
 
-Rev 1 was too optimistic in three specific ways, corrected here: it called the
-infrastructure "built" when the substrate prerequisites are explicitly not in
-place, it sized host nodes from a constant the codebase contradicts, and it
-proposed a management stride that is internally unsatisfiable and that the
-generator refuses today.
+Review history, all findings verified against the sources before acceptance:
+
+- **rev 1 → rev 2**, five blockers. Rev 1 called the infrastructure "built" when
+  the substrate prerequisites are explicitly absent, sized host nodes from a
+  constant the codebase contradicts by 12x, and proposed a management stride that
+  is internally unsatisfiable and that the generator refuses today.
+- **rev 2 → rev 3**, three further findings. Rev 2's manifest R named a commit
+  where it needed a measured content digest (§6); its disposable proof carried a
+  waiver inside an acceptance gate (§7); and it scoped host-loss recovery to "a
+  pod" when a host also carries half the shared core tier (§6).
+
+The recurring shape in all eight: something that **names** a fact standing in for
+something that **measures** it.
 
 Scope: what S1→S2 needs to run one fabric across two hosts. It does **not**
 design the S1→S2 migration (step 4) or authorize any change to the live pair.
@@ -202,10 +210,29 @@ quarantined **in isolation of other pods** — but never in isolation of the sha
 core tier it attaches to."* The correct contract is:
 
 - the **revision** goes and stays RED while any unit is unconverged;
-- the **failed pod** is repaired in isolation;
+- the **failed unit** is repaired in isolation;
 - the **healthy pod keeps running**;
 - shared-tier (core) changes have a larger blast radius and get their own
   explicit acceptance gate.
+
+### The failed unit is not "a pod"
+
+Each host carries one pod **and five of the ten shared cores**, round-robined. So
+losing a host is not losing a pod. Measured on S2:
+
+    cores: 10 total, 5 on host 1, 5 on host 2
+    pod-1 spine->core links: 100 to host-1 cores, 100 to host-2 cores
+
+**Killing host 2 costs pod 1 exactly half of its 200 core uplinks**, on top of
+losing all of pod 2 and half the shared tier. Pod 1 keeps running the whole time.
+
+The recovery scope is therefore:
+
+    { the pod, its assigned cores, the attachment and tunnel ends they carry }
+
+not "the pod". And because the shared tier is partly gone, the repair crosses the
+shared-tier acceptance gate that Pillar 1 requires — it is not a pod-local event
+even though only one pod's devices vanished.
 
 Pillar 1 also records that the containerlab unit lifecycle this depends on
 **does not exist today**. That is a prerequisite, not a detail.
@@ -222,11 +249,57 @@ placement, or the same code.
           unit set            which pods/tiers exist and which host owns each
           placement           the device -> host assignment itself
           profile/SoT fingerprint
-          code closure        the commit every host actually ran }
+          code closure        the reviewed CONTENT DIGEST of each repository }
 
-Every per-host result records R's fingerprint; the gate refuses if any two
-disagree. This is the same reasoning as the run-id gate one level up: the failure
-it prevents is two hosts building different fabrics and both reporting success.
+**A commit id is intent; a content digest is evidence.** An earlier draft defined
+the code closure as "the commit every host actually ran" and asked each host to
+record R's fingerprint. That is echoable: a stale host can report the expected
+value while executing different bytes, and nothing in the record would differ.
+
+This project has already paid for exactly that. `deploy/lib.sh:455-476` records
+the incident — `result-fabric.json` carried `git_sha 3e2d264` for a build whose
+working tree was `927ded8`, so *"seven commits of the change under test were
+invisible to the record of the run that tested them"* — and fixes it by
+distinguishing four fields:
+
+    code_sha      what actually ran   (the synced commit, else HEAD)
+    code_source   "sync" | "git"      how code_sha was determined
+    code_tree     CONTENT DIGEST of the synced tree
+    git_sha       the host ref, unchanged
+
+The split is not theoretical, and the machinery is currently WRONG on the live
+host — which is the strongest possible argument for measuring rather than
+echoing. Read from `gpufab-fabric-01` after the successful paired deploy:
+
+    run_id       20260902T111015-3ffc-c14061f    <- built from git at c14061f
+    git_sha      c14061f...                       correct
+    code_source  "sync"                           WRONG
+    code_sha     11dbbf2...                       WRONG, three commits stale
+    code_tree    b9b8eaac...                      digest of a tree no longer on disk
+    actual HEAD  a14f566...
+
+`sync_branch.sh` stamped `.gpufab-source` at 07:58; nothing removes it when a
+later deploy takes the **git** path, and the file is untracked so stage 00's
+`checkout --force` leaves it. Every git build since has reported itself as a
+synced build from a commit it did not run.
+
+This is the 3e2d264/927ded8 incident inverted — a stale stamp rather than an
+absent one — and it is exactly why R's code closure must be a digest each host
+COMPUTES from its own tree after bootstrap, compares, and refuses on mismatch. A
+manifest that trusted the recorded `code_sha` here would certify the wrong code
+today. (Tracked separately; not fixed by this document, which changes no code.)
+
+So R carries the reviewed per-repository **content digests**, and the obligation
+on each host is to MEASURE, not to echo:
+
+1. after bootstrap, each host independently computes its own tree digest, by the
+   same expression on both sides — the property `sync_branch` already relies on;
+2. it **refuses to proceed** on a mismatch, rather than recording one;
+3. it records the **observed** digest, not the expected one, and the gate compares
+   observed against R.
+
+A result that reports the expected digest without having measured it is the
+"measured nothing, reported a number" shape, one level up from the code.
 
 ---
 
@@ -253,18 +326,51 @@ link: both endpoints, both interfaces, VNI, remote IP, UDP port — not a count 
 Corrected measurement, per link rather than per pair: **200 cross-host links,
 200 distinct VNIs, 0 collisions.**
 
-The proof:
+The proof is TWO stages, and they are not interchangeable. An earlier draft
+allowed the substrate prerequisites to be waived "with the limitation recorded".
+That is legitimate for an exploratory spike and inadmissible in an acceptance
+gate: a single-NIC 1460-MTU run qualifies nothing about a dual-NIC 8896-MTU
+design, and recording that it doesn't does not make it evidence. A waiver inside
+an acceptance gate is how a degraded stage reaches green.
+
+### Stage A — mechanism spike (waivers allowed, proves only mechanism)
+
+Purpose: does the cross-host mechanism work at all. Explicitly does **not**
+qualify the production substrate, and no result from it may be cited in the
+step-6 decision.
 
 1. Two disposable fabric hosts under an explicit one-pod-per-host placement.
-2. Substrate prerequisites in place (fabric VPC at 8896, firewall on the settled
-   port, dual-NIC) — or an explicit, recorded decision to test without them and
-   what that does not prove.
-3. Both slices generate — i.e. §3's address projection exists.
-4. Every one of the 200 tunnels matches the model-derived tuple, and carries
-   traffic. Presence of a VXLAN interface is not function.
-5. A **deliberate partial failure**: kill host 2 mid-deploy; the revision must go
-   RED while pod 1 keeps running — not a global rebuild, per §6.
-6. Teardown proven with evidence.
+2. Both slices generate — i.e. §3's address projection exists.
+3. Tunnels come up and pass traffic on whatever substrate is available.
+4. Teardown proven with evidence.
+
+Any waiver taken here is recorded with what it invalidates.
+
+### Stage B — production-substrate acceptance (NO WAIVER)
+
+Purpose: qualify the design that will run. Every condition is mandatory; a
+missing prerequisite is a STOP, not a footnote.
+
+1. Substrate prerequisites actually in place: dedicated fabric VPC at **MTU
+   8896**, firewall on the settled port (§4), **dual-NIC** hosts. None may be
+   waived.
+2. **Jumbo behaviour measured end to end** — full-MTU frames across the cut,
+   without fragmentation, on the fabric NIC. The MTU is the reason the fabric VPC
+   exists; a proof that never sends a large frame has not tested it.
+3. Every one of the 200 tunnels matches its model-derived tuple — both endpoints,
+   both interfaces, VNI, remote IP, UDP port — and carries traffic. Presence of a
+   VXLAN interface is not function, and a count is not identity.
+4. Manifest R measured, not echoed, on every host (§6).
+5. A **deliberate partial failure**: kill host 2 mid-deploy. The revision must go
+   RED, and pod 1 must be measured against a **defined service level** — not
+   observed to be "still running". Pod 1 survives host 2's loss with half its core
+   uplinks gone; liveness cannot distinguish that from health. State the expected
+   post-loss numbers (surviving sessions, reachable prefixes) and assert them.
+6. Repair is scoped to {pod 2, its five cores, their tunnel ends} and crosses the
+   shared-tier acceptance gate, with host 1's objects untouched throughout.
+7. Teardown proven with evidence.
+
+Only after Stage B does step 6 (rebuild live S1) become answerable.
 
 ---
 
