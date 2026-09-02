@@ -1,6 +1,6 @@
 # Multi-host fabric — the design for blocker 1
 
-Status: **NOT APPROVED, rev 3.** Not authorized for implementation. This is a
+Status: **NOT APPROVED, rev 4.** Not authorized for implementation. This is a
 problem statement, not a plan: it records what is built, what is not, and what
 must be settled before anything is.
 
@@ -14,9 +14,16 @@ Review history, all findings verified against the sources before acceptance:
   where it needed a measured content digest (§6); its disposable proof carried a
   waiver inside an acceptance gate (§7); and it scoped host-loss recovery to "a
   pod" when a host also carries half the shared core tier (§6).
+- **rev 3 → rev 4**, two findings, both introduced by rev 3's own refinements.
+  Its Stage-B "full-MTU without fragmentation" was undefined and, at production
+  frame sizes, impossible — and contradicted an existing section that had already
+  settled the arithmetic (§7). Its digest requirement said "the same expression
+  `sync_branch` uses", which is MD5 over a policy-dependent tar, and left the
+  measuring code inside the tree it authenticates (§6).
 
-The recurring shape in all eight: something that **names** a fact standing in for
-something that **measures** it.
+The recurring shape in all ten: something that **names** a fact standing in for
+something that **measures** it. Rev 3 reproduced that shape twice while fixing
+three instances of it.
 
 Scope: what S1→S2 needs to run one fabric across two hosts. It does **not**
 design the S1→S2 migration (step 4) or authorize any change to the live pair.
@@ -292,11 +299,30 @@ today. (Tracked separately; not fixed by this document, which changes no code.)
 So R carries the reviewed per-repository **content digests**, and the obligation
 on each host is to MEASURE, not to echo:
 
-1. after bootstrap, each host independently computes its own tree digest, by the
-   same expression on both sides — the property `sync_branch` already relies on;
-2. it **refuses to proceed** on a mismatch, rather than recording one;
-3. it records the **observed** digest, not the expected one, and the gate compares
+1. after bootstrap, each host independently computes its own tree digest and
+   **refuses to proceed** on a mismatch, rather than recording one;
+2. it records the **observed** digest, not the expected one, and the gate compares
    observed against R.
+
+**The digest procedure must be frozen in R, not inherited.** "The same expression
+`sync_branch` uses" is not a specification: that expression is
+`md5sum <"$TAR.local"` (`tools/sync_branch.sh:194`) — MD5, over a tar whose
+contents depend on the exclusion flags in force at the time. The live host's
+`code_tree b9b8eaac7e32ccf4843830b9bdf8f2f5` is 128-bit, confirming it. A digest
+whose recipe can drift is not an identity. R therefore pins:
+
+    algorithm    SHA-256
+    inclusions   which paths are covered
+    exclusions   .git, caches, generated artifacts -- enumerated, not implied
+    ordering     canonical sort, so two hosts cannot disagree by traversal order
+    normalisation what is done about modes and symlinks
+
+**And the measuring routine must not come from the tree being measured.** A
+digest computed by a script inside the checkout it is authenticating is circular:
+a stale or wrong checkout supplies the very code that certifies it. The routine
+must be launcher-supplied or independently authenticated. This is not a
+hypothetical — §6's live example is a stale artifact *in the checkout* causing
+every git build to misreport its own provenance.
 
 A result that reports the expected digest without having measured it is the
 "measured nothing, reported a number" shape, one level up from the code.
@@ -354,9 +380,44 @@ missing prerequisite is a STOP, not a footnote.
 1. Substrate prerequisites actually in place: dedicated fabric VPC at **MTU
    8896**, firewall on the settled port (§4), **dual-NIC** hosts. None may be
    waived.
-2. **Jumbo behaviour measured end to end** — full-MTU frames across the cut,
-   without fragmentation, on the fabric NIC. The MTU is the reason the fabric VPC
-   exists; a proof that never sends a large frame has not tested it.
+2. **MTU behaviour, as a NUMERIC contract.** An earlier draft asked for
+   "full-MTU frames without fragmentation", which is undefined and, at
+   production frame sizes, impossible. `scale-out-architecture.md` **CORRECTION
+   (#100)** already settles the arithmetic — and supersedes the 9214/9000 figures
+   quoted elsewhere in that file, which "was read by nothing":
+
+       9100  MEASURED switch port MTU (not 9000)
+       8896  GCP VPC maximum (the PROPOSED fabric VPC; it does not exist today)
+     -  ~50  substrate VXLAN  -> 8846 on the wire across the cut
+     -  ~50  the fabric's OWN overlay riding inside it -> 8796 to the payload
+     = 304 bytes SHORT of the 9100 port; 254 short even with no overlay at all
+
+   So the deficit is **pre-existing, not a VXLAN problem** — VXLAN only makes it
+   visible. It does not bind today because pod-atomic placement keeps every
+   cross-host link at `core-spine`, so VTEP traffic rides local veths; it begins
+   to bind exactly when a real multi-host deployment carries production frames
+   across the cut, which is what Stage B is for.
+
+   The acceptance contract is therefore four assertions, not one:
+
+   - **8846 with DF succeeds** on the wire across the cut;
+   - **8796 with DF succeeds** for overlay-encapsulated payload — the figure that
+     actually governs tenant traffic;
+   - **8847 / 9100 with DF produce the expected PMTUD behaviour** — ICMP
+     "fragmentation needed" naming the true ceiling, and MSS clamping where the
+     path requires it. Silent blackholing of large flows is the classic
+     production failure this must reproduce rather than avoid;
+   - **local links retain their measured MTU** — 9100 switch port, 9500 host
+     veth, which `tests/t58-mtu-headroom.sh` already asserts (measured local
+     overlay headroom 350 bytes). A proof that quietly lowered intra-pod MTU to
+     make the cross-host case pass would destroy the property pod-atomic
+     placement exists to protect.
+
+   The 304-byte shortfall is recorded as a **known fidelity limit**, not a defect
+   to be engineered away: anything measuring cross-pod throughput at production
+   frame sizes is measuring the substrate. Closing it needs bare metal or a
+   provider permitting a >=9264 underlay — a substrate choice, not a design
+   change.
 3. Every one of the 200 tunnels matches its model-derived tuple — both endpoints,
    both interfaces, VNI, remote IP, UDP port — and carries traffic. Presence of a
    VXLAN interface is not function, and a count is not identity.
