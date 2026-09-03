@@ -270,12 +270,37 @@ Two further facts rev 1 omitted:
 - **MTU.** The control VPC is 1460. VXLAN encapsulation over a 1460-byte path
   will fragment or drop fabric traffic; the prerequisite table calls for a
   dedicated 8896-MTU fabric VPC precisely for this. Untested either way.
-- **Port contradiction, unresolved.** `gen_topology.py:472` emits `udp-port:
-  14789`. `scale-out-architecture.md` says allow **4789** and pass `--dst-port
-  4789` "since clab defaults to 14789". Two committed documents disagree about
-  which port the firewall must open. This must be settled before a rule is
-  written, or the rule will be for the wrong port and the symptom will be tunnels
-  that never come up.
+- **Port contradiction — SETTLED: the substrate uses 14789.** `gen_topology.py:472`
+  emitted `udp-port: 14789` while `scale-out-architecture.md` said open **4789**.
+  Resolved by measurement rather than preference.
+
+  *Packet evidence*, two network namespaces standing in for two hosts:
+
+      dstport 14789  ->  10.99.0.1.44719 > 10.99.0.2.14789
+      dstport  4789  ->  10.99.0.1.44719 > 10.99.0.2.4789
+
+  The configured `dstport` is exactly what lands on the wire, so either choice
+  works and the tie-break is operational, not technical. **The source port is
+  ephemeral and varies per flow** (44719, 45124, 39733 across three packets) —
+  VXLAN's ECMP entropy hash — so the firewall rule must match DESTINATION only.
+  A rule constraining source port would drop traffic intermittently, which is a
+  far worse failure than dropping it outright.
+
+  *The deciding fact*: the EMULATED fabric already uses 4789. The frontend-leaf
+  VTEP artifact declares `VXLAN_TUNNEL {"vtep": {"src_ip": ...}}` with **no
+  dst_port**, so SONiC takes its default, the IANA port. Using 4789 for the
+  substrate as well would put the thing being emulated and the thing doing the
+  emulating on one port number, where no capture, counter or firewall rule could
+  separate them.
+
+  **Decision: substrate 14789, emulated fabric 4789, and the firewall opens
+  14789 ONLY.** It keeps clab's default, so no `--dst-port` is needed and the
+  "must be set explicitly" failure mode disappears; nothing outside our VPC
+  interoperates here, so the IANA number buys nothing; and 14789 on the wire
+  reads unambiguously as "substrate". Deliberately NOT opening 4789 on the
+  substrate: fabric VXLAN must never cross a host boundary under pod-atomic
+  placement, so if it ever appears there it is a placement bug and should be
+  dropped loudly rather than carried silently.
 
 ---
 
@@ -666,8 +691,10 @@ Only after Stage B does step 6 (rebuild live S1) become answerable.
    allowance; the constraint is mandatory because on `highmem-64` the bin-packer
    otherwise collapses S2 onto a single host. Implementing the constraint is a
    code change and is not authorized here.
-3. **Settle UDP 4789 vs 14789** between `gen_topology.py` and
-   `scale-out-architecture.md` before any firewall rule is written.
+3. ~~**Settle UDP 4789 vs 14789.**~~ **DECIDED (§4):** substrate **14789**,
+   emulated fabric 4789, firewall opens 14789 only and deliberately not 4789.
+   Settled by packet capture, not preference. `scale-out-architecture.md` still
+   states 4789 and must be corrected to match.
 4. **Decide the management projection** (§3): routed core management, or a
    shard-level projection onto clab's single mgmt network.
 5. **Port allocator** — unchanged from rev 1 and still coupled: restoring `tier`

@@ -1304,7 +1304,7 @@ deploy, fabric→head Prometheus federation (the head scrapes each host's
 exporter), DHCP relay unicast, log shipping, and the relay's calls out to GitHub.
 
 **Plane 2 — emulated fabric wires: VXLAN on a dedicated overlay network.** A
-cross-host switch↔switch link becomes a VXLAN tunnel (UDP 4789), tc-redirected
+cross-host switch↔switch link becomes a VXLAN tunnel (UDP 14789), tc-redirected
 onto the containerlab-created `host:` interface. One VNI per link. These tunnels
 ride a **separate high-MTU VPC on the fabric hosts' second NIC**, not the control
 network — see "Separate the overlay from the control plane" below. Because pod-atomic
@@ -1374,7 +1374,7 @@ compromise on each.
 |---|---|---|
 | network | `gpufab-vpc` (existing) | **`gpufab-fabric-vpc`** (new) |
 | MTU | 1460 (unchanged) | **8896** |
-| carries | SSH, Prometheus, DHCP relay, logship, GitHub | **VXLAN only** (UDP 4789) |
+| carries | SSH, Prometheus, DHCP relay, logship, GitHub | **VXLAN only** (UDP 14789) |
 | external access | egress via Cloud NAT | **none — internal only** |
 | subnet | `10.10.0.0/24` | **derived** from placed host count, per region (see below) |
 
@@ -1415,7 +1415,7 @@ containerlab tools vxlan create \
     --dev   <guest iface, e.g. ens5>    # the LINUX device name, not the GCP NIC name
     --remote <peer overlay address> \
     --id    <vni> \
-    --dst-port 4789                     # clab defaults to 14789
+    --dst-port 14789                    # clab's default; see the note below
 ```
 
 - `--link` is not optional. Without it nothing is redirected and the tunnel
@@ -1423,9 +1423,23 @@ containerlab tools vxlan create \
 - `--dev` takes the **guest** interface name. GCP's `nic1` is an API-side label;
   inside the instance it is `ens5` or similar, and must be resolved at deploy
   time rather than assumed.
-- `--dst-port` must be set explicitly. **containerlab defaults to UDP 14789**,
-  while the firewall rule below opens 4789 — left mismatched, every tunnel is
-  dropped by the firewall. Pick one port and use it in both places.
+- `--dst-port` — **SETTLED 2026-09-03 by packet capture: the substrate uses
+  14789**, containerlab's default. An earlier draft here said 4789 while
+  `gen_topology.py:472` emitted 14789; left mismatched, every tunnel is dropped
+  by the firewall.
+
+  Measured in two network namespaces: the configured `dstport` is exactly what
+  lands on the wire (`> 10.99.0.2.14789` / `> 10.99.0.2.4789`), so either works
+  and the tie-break is operational. The deciding fact is that the EMULATED fabric
+  already uses 4789 — the frontend-leaf VTEP artifact declares no `dst_port`, so
+  SONiC takes the IANA default. Using 4789 for the substrate too would put the
+  thing being emulated and the thing doing the emulating on one port, where no
+  capture or firewall rule could separate them.
+
+  Also measured: the SOURCE port is ephemeral and varies per flow (VXLAN's ECMP
+  entropy hash), so the firewall must match DESTINATION only. A rule constraining
+  source port drops traffic intermittently, which is worse than dropping it
+  outright.
 - **Tunnels are unidirectional.** Each cross-host link needs the command run on
   *both* endpoints with the VNI and port matching; creating one side yields a
   link that appears configured and passes nothing.
@@ -1476,7 +1490,7 @@ Checked against the live project; **none are currently in place**:
 | requirement | today | needed |
 |---|---|---|
 | fabric VPC | does not exist | create at **MTU 8896**; subnet prefix derived per region |
-| VXLAN firewall | only `tcp:22`, on `gpufab-vpc` | allow **UDP 4789** within the fabric subnet — and pass `--dst-port 4789`, since clab defaults to 14789 |
+| VXLAN firewall | only `tcp:22`, on `gpufab-vpc` | allow **UDP 14789**, **dst only**, within the fabric subnet (settled by packet capture; the source port is ephemeral, so a rule matching it drops traffic intermittently) |
 | fabric-host NICs | single-NIC | **dual-NIC**, assigned at instance creation |
 | IP forwarding | `canIpForward: False` | required **only if** plane-3 option 1 is chosen |
 | control subnet size | `/24` = 254 usable | fine to S5 (35 hosts); a `/22`+ before S8 |
