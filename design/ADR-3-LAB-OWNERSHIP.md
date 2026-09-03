@@ -139,8 +139,28 @@ and what would make it a false pass.
 | A3 | each bridge's two endpoints match R exactly, including the parallel discriminator | counting 14 links between a pair while they are cross-connected |
 | A4 | destroying pod-2's lab leaves pod-1's containers with identical `{name,Id,StartedAt}` | a restart counted as "unaffected" |
 | A5 | destroying pod-2 leaves its bridges present until R shows both owners absent | a bridge removed while pod-1 still holds its half |
-| A6 | pod-1 dataplane measured **continuously** across pod-2's destroy, against a stated service level | "still running" while degraded |
+| A6 | the **canary path** below, measured continuously across pod-2's destroy | "still running" while degraded |
 | A7 | the revision is RED in every partial state | a green verdict mid-transition |
+
+### A6's service level — a tested canary path, not the pod dataplane
+
+Fixed, so "measured continuously" has a number behind it:
+
+- configure ONE exact pod-1-spine ↔ core point-to-point path across its dedicated
+  bridge;
+- require **20/20** successful baseline probes before anything is destroyed;
+- probe every **200 ms**, from before pod-2's destruction until **ten seconds**
+  after it completes;
+- require at least **50 transmitted** packets and **exactly zero loss**;
+- require pod-1 and core `{name,Id,StartedAt}` manifests unchanged;
+- require every bridge formerly shared by pod-2 and core to remain **present and
+  correctly attached** after pod-2 disappears.
+
+It is called a canary path deliberately. It is one link, not the pod's dataplane,
+and claiming otherwise would be the same overreach as calling a converged-idle
+RSS sample a capacity allowance. What it proves is that destroying one unit does
+not disturb a path that crosses the shared tier — which is the property under
+test.
 
 **Two hosts — replace selected bridge halves with VXLAN 14789**
 
