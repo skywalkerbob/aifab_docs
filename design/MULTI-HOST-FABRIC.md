@@ -262,7 +262,7 @@ plainly: **"Checked against the live project; none are currently in place"**
 | requirement | today | needed |
 |---|---|---|
 | fabric VPC | does not exist | create at **MTU 8896** |
-| VXLAN firewall | only `tcp:22`, on `gpufab-vpc` | allow **UDP 4789** within the fabric subnet |
+| VXLAN firewall | only `tcp:22`, on `gpufab-vpc` | allow **UDP 14789**, **dst only**, within the fabric subnet (§4) |
 | fabric-host NICs | **single-NIC** (`fabric.tf:102`) | dual-NIC, assigned at instance creation |
 
 Two further facts rev 1 omitted:
@@ -294,10 +294,17 @@ Two further facts rev 1 omitted:
   separate them.
 
   **Decision: substrate 14789, emulated fabric 4789, and the firewall opens
-  14789 ONLY.** It keeps clab's default, so no `--dst-port` is needed and the
-  "must be set explicitly" failure mode disappears; nothing outside our VPC
-  interoperates here, so the IANA number buys nothing; and 14789 on the wire
-  reads unambiguously as "substrate". Deliberately NOT opening 4789 on the
+  14789 ONLY.** 14789 matches containerlab's CURRENT default, so nothing has to
+  change to adopt it; nothing outside our VPC interoperates here, so the IANA
+  number buys nothing; and 14789 on the wire reads unambiguously as "substrate".
+
+  **The port is still set EXPLICITLY, in both the emitter and the operator
+  command, and that is deliberate.** Relying on the default would make the wire
+  port a property of whatever containerlab version is installed: an upstream
+  change would move it silently, the firewall would keep matching 14789, and
+  every tunnel would stop passing traffic with nothing in our tree having
+  changed. Matching the current default is a convenience; depending on it is a
+  dependency on someone else's decision. Deliberately NOT opening 4789 on the
   substrate: fabric VXLAN must never cross a host boundary under pod-atomic
   placement, so if it ever appears there it is a placement bug and should be
   dropped loudly rather than carried silently.
@@ -693,8 +700,8 @@ Only after Stage B does step 6 (rebuild live S1) become answerable.
    code change and is not authorized here.
 3. ~~**Settle UDP 4789 vs 14789.**~~ **DECIDED (§4):** substrate **14789**,
    emulated fabric 4789, firewall opens 14789 only and deliberately not 4789.
-   Settled by packet capture, not preference. `scale-out-architecture.md` still
-   states 4789 and must be corrected to match.
+   Settled by packet capture, not preference. Both design documents and
+   `gen_topology.py` now state 14789, and `t79` pins their agreement.
 4. **Decide the management projection** (§3): routed core management, or a
    shard-level projection onto clab's single mgmt network.
 5. **Port allocator** — unchanged from rev 1 and still coupled: restoring `tier`
