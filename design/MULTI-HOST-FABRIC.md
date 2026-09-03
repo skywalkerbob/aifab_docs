@@ -660,8 +660,12 @@ Only after Stage B does step 6 (rebuild live S1) become answerable.
    Calibrate later from a full 76/76 time series at peak or a conservative
    percentile. This does **not** block the machine decision: the node term is
    1.2% of an S2 shard.
-2. **Choose the machine and pin the placement.** Neither current option yields a
-   valid two-host S2; a one-pod-per-host constraint is required either way.
+2. ~~**Choose the machine and pin the placement.**~~ **DECIDED (§2):**
+   `n2-highmem-64` with an EXPLICIT one-pod-per-host placement constraint.
+   `highmem-32` fits at converged idle but sits at 92.9% before any peak
+   allowance; the constraint is mandatory because on `highmem-64` the bin-packer
+   otherwise collapses S2 onto a single host. Implementing the constraint is a
+   code change and is not authorized here.
 3. **Settle UDP 4789 vs 14789** between `gen_topology.py` and
    `scale-out-architecture.md` before any firewall rule is written.
 4. **Decide the management projection** (§3): routed core management, or a
