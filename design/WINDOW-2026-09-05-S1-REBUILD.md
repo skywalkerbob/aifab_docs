@@ -389,3 +389,55 @@ FAILED the gate for containing a literal SoT address (`10.10.0.20`) — the exac
 3. A qualification-lane change that has completed its acceptance evidence.
 
 D1–D3 are qualification-lane backlog. None justifies rebuilding this fabric.
+
+---
+
+# D4 (NEW, from experiment E1) — compute nodes are carrying fabric transit
+
+**Found by the first experiment on the frozen baseline. Read-only; nothing was
+changed. This is a QUALIFICATION-LANE item — the fix lives in the render.**
+
+GPU/CPU nodes act as TRANSIT ROUTERS between fabrics the topology separates. 6 of
+6 backend leaves sampled reach ~119 of 120 /32 destinations over at least one
+path whose AS_PATH crosses a host ASN.
+
+The switch-only graph has FIVE DISCONNECTED COMPONENTS by design — backend pod1
+(18 switches), backend pod2 (18), frontend (5), storage (5), oob (2). From a
+backend leaf that is 18 switches + 63 attached hosts = 81 reachable. The box
+reaches 119. The extra 38 exist only because multi-homed hosts re-advertise what
+they learn. Confirmed by AS_PATH on the box:
+
+    10.0.0.16/32 (POD 2 leaf) from a POD 1 leaf:
+      aspath: 4200000048 4200000016      <- 4200000048 = dc1-pod001-gpu0001
+
+**Why it blocks perturbation experiments.** Transit consumes NIC and CPU that
+belong to the workload; a path's viability starts depending on whether a COMPUTE
+NODE is up; and blast-radius or convergence runs would measure phantom
+redundancy. It is invisible to every reachability test — a route through a GPU
+node answers a ping exactly as well as a route through a spine.
+
+**Recommended fix (qualification lane):** host BGP exports only the node's own
+loopback. Then re-run `experiments/e1-transit-policy.sh`, which should go PASS,
+and re-run `e1-ecmp-width.sh` whose oracle (81 destinations, {w1=34, w2+=47})
+should then match the box.
+
+## What E1 cost, and what that says about the method
+
+Five runs across two scripts, ZERO fabric changes, and every intermediate defect
+was in the instrument rather than the fabric — until the last one, which was
+real. The controls blocked publication TWICE, both times correctly:
+
+  * counting a host ASN ANYWHERE as transit scored every ordinary route TO a host
+    as a leak; the negative control caught it (zero origin-only paths is
+    impossible on a working fabric).
+  * evaluating origin per PREFIX made the control unable to fire at all once
+    leakage was pervasive. **A control that cannot fire on a WORKING system is
+    worse than one that cannot fire on a broken one — it blocks every real
+    result.**
+
+And a bash trap worth carrying: a backtick inside an UNQUOTED heredoc is a live
+command substitution, even in a comment. It ran `hit` on every iteration.
+
+The through-line matches the freeze rationale: controls prove an instrument
+distinguishes states; they do NOT prove its oracle describes the right property.
+Independence is not sufficiency.
