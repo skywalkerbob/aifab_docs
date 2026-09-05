@@ -190,6 +190,52 @@ string. Until that exists, no cut figure is a design invariant.
 
 ---
 
+## 2b. Port allocation — the two-block scheme is INERT (2026-09-05)
+
+`fabric_model._port_namer` documents a scheme whose whole purpose is additive
+growth: *downlinks allocated UPWARD from port 0, uplinks DOWNWARD from the last
+port, ranked by peer name*, so "adding downstream devices cannot move an uplink".
+Its docstring records the defect it was written to fix — S0 -> S1 moving 154 of
+284 links, and a seed dying on `Duplicate termination found`.
+
+**It has never run.** The classification reads
+
+    ra = TIER_RANK.get(A.get("tier"), 3)
+
+and `by_name` holds `as_seed_topology`'s node records, which carry `role` and
+**not** `tier`. Every device therefore ranks 3, `theirs < mine` is never true, and
+**every link is classified a downlink**. The two blocks were never two.
+
+MEASURED consequence. With everything a downlink and ranking by name,
+`dc1-ba-core001` sorts before `dc1-pod001-…`, so the core tier appearing at S2
+takes ports 0..47 and pushes pod-1's leaves from `Ethernet0` to `Ethernet384`:
+**70 links that already existed move**, which is t08's remaining failure.
+
+Supplying the tier fixes it exactly — S1 -> S2 goes from 70 changed links to
+**0**, and the emitted layout matches the docstring (leaves from `Ethernet0` up,
+cores from `Ethernet504` down).
+
+### Why it is not landed
+
+It re-cables the running fabric. MEASURED on `s1-512`: **1234 of 1590 map rows
+change**, touching 1234 leaf and 1152 GPU rows. A leaf's spine-facing ports move
+from `Ethernet0/8` to `Ethernet504/496`, because the live fabric was cabled under
+the inert scheme and the correct scheme assigns different ports.
+
+There is no compatibility-preserving variant. Pinning S1 to the legacy scheme and
+using the corrected one from S2 leaves the two rungs on different schemes, so the
+70 links still differ. The property "growth is additive" cannot hold for this
+fabric's cabling unless the fabric adopts the corrected allocator, which is one
+rebuild.
+
+**THE DECISION IS THE OPERATOR'S**, because until the rebuild happens the model
+and the running fabric disagree, and a re-seed would meet NetBox cables that
+already exist — the `Duplicate termination found` failure the docstring names.
+The change itself is two lines: carry `tier` into the emitted record, and refuse
+rather than default when a switch has none.
+
+---
+
 ## 3. Management addressing — rev 1's proposal is withdrawn
 
 ### Why it was unsatisfiable
@@ -239,6 +285,21 @@ case, and it needs routed pod mgmt, not a silently widened supernet here."*
 
 So "pod plus its five cores in one host `/24`" is not expressible: cores are in a
 different subnet by construction, and one clab topology has one mgmt network.
+
+### Resolved 2026-09-05 — the base is held
+
+The profiles now declare `172.20.0.0/16` for S2..S5, which is the option measured
+above. S1 is untouched, so the running fabric is unaffected, and `t08`'s
+management assertion passes: **S1 -> S2 moves 0**, as do S3 -> S4 and S4 -> S5.
+
+Two things that measurement did NOT settle, both now measured:
+
+- **S2 -> S3 still moves 180.** The core tier's management slot is
+  `core_pod_slot = max_pods - 1`, taken from the declared envelope, so declaring
+  35 pods instead of 2 relocates every core: `172.20.2.2` becomes `172.20.35.2`.
+  Harmonising every envelope field across the rungs takes every transition to
+  **0 moved** — and moves **85 of S1's own devices**, so it is not free. t08 does
+  not compare S2 -> S3, which is why this was invisible.
 
 **Required: a placement-aware address projection.** Changing `oob_plan.py`'s
 stride cannot express this through one global profile, because the constraint is
