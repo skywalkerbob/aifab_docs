@@ -332,3 +332,60 @@ authoritative role result; a direct `deploy.sh --from` invocation does not. The
 fabric is converged; the ROLE has no clean finish on record. Writing one requires
 running the full role, which redeploys topology — NOT worth destroying a green
 fabric for a bookkeeping record.
+
+---
+
+# FROZEN — S1 experiment baseline (2026-09-05)
+
+**Classification: EXPERIMENT-QUALIFIED, NOT MONITORING-QUALIFIED.**
+
+Frozen at platform `a7b0d43`, network `c9c6b83`, docs `de2715a`. The freeze is
+enforced over BEHAVIOURAL TREES, not commit SHAs — pinning commits made the gate
+invalidate itself the moment it was committed, and would have refused every
+experiment after any docs push:
+
+    platform/deploy      4c3d83ffae3c41a4c529b82cfcc5ae6ca103d626
+    platform/tools       c54158d31a0a14eab032ee01e6fdc2f3e8f938bf
+    platform/clab        7c275234cc9f2be77605abe6f5c87266ab718c6a
+    platform/monitoring  a71b34f3caa8a9d8d88c88b325fe0e385159c3e9
+    network/tools        57e790fe374610e9f2e78ab0d241a17dd6755863
+    network/design       d03056389b6d02b166ec0cdd8d69a85c22957b7e
+
+Commits after the freeze (`b0c0cbd`, `a0dca33`) touch `tests/` ONLY; all six
+trees verified byte-identical, so the behavioural platform has not been reopened.
+
+## Operating rules
+
+- **Oracle** is `tests/verify.sh` and direct device/dataplane measurement.
+- **Do NOT draw conclusions from Prometheus/Grafana while D1 is open.** The
+  exporter reads 0 against a fabric measurably at 1464/1464.
+- **Pinned expected failures** (D3): `fabric role failed before completion` and
+  `stages with NO artifact`. Any CHANGED signature or ADDITIONAL failure is a
+  regression.
+- **If D2 recurs** (stale kernel addresses), STOP the affected experiment and
+  investigate in the qualification lane. Do not repair the baseline
+  opportunistically — t88 detects it and `deploy/repair_kernel_addrs.sh` fixes
+  it, but doing so mid-experiment invalidates the run.
+
+## Before every experiment
+
+    tests/admit-experiment.sh              # ADMIT / REFUSE / UNKNOWN
+    tests/admit-experiment.sh --self-test  # negative control
+
+~4 minutes. Verdict on the frozen baseline: **ADMIT**, 228 assertions over five
+phases (SoT identity, applied configuration, BGP, EVPN+VTEPs, kernel addressing).
+UNKNOWN is a distinct outcome and is NOT a pass.
+
+Both controls fired on first use, which is the only reason to trust the gate:
+the negative control caught `gpufab-fabric-01` one docs commit behind, and t52
+FAILED the gate for containing a literal SoT address (`10.10.0.20`) — the exact
+#129 defect. The address is now derived from the fabric host's own
+`/opt/gpufab/sot`, or the check refuses.
+
+## Reopen the freeze only for
+
+1. A safety or data-integrity defect.
+2. A blocker to a NAMED experiment.
+3. A qualification-lane change that has completed its acceptance evidence.
+
+D1–D3 are qualification-lane backlog. None justifies rebuilding this fabric.
