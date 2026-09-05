@@ -285,3 +285,50 @@ t39 63/2 -> 65/0, t44 29/2 -> 31/0, t41 85/1 -> 86/0. Gate: 9 failed phases -> 4
 To close them: land `t88` and `repair_kernel_addrs.sh`, sync both hosts, then run
 `deploy.sh --from 60-auth` so the role writes a clean result. None of that
 changes fabric state.
+
+---
+
+# DEFERRED (explicitly, per the lane split)
+
+Triage rule for this window: fix only what blocks an experimentally usable green
+S1, or threatens safety/data integrity. Everything else is deferred to the
+QUALIFICATION lane rather than fixed here.
+
+## D1 — the exporter reports 0 while the dataplane is fully converged
+
+`gpufab_scrape_ok 0/46`, `gpufab_bgp_peer_up 0/1464`, `mgmt_reachable 0/48`,
+while the boxes are measurably at 1464/1464 and their mgmt IPs answer ping. The
+metric is WRONG, not the fabric. Do not use Prometheus/Grafana to judge this
+fabric until this is fixed; use `tests/verify.sh`, which reads the boxes.
+
+RULED OUT — do not re-tread:
+  * NOT stale pre-AAA credentials. `60-auth` completed ("exporter refreshed;
+    46/46 switches scraped OK") and a subsequent restart did not change it.
+  * NOT stale SSH control masters. 48 sockets under /tmp/gpufab-cm-* were removed
+    and the exporter restarted: still 0/46.
+  * NOT the `_key_arg()` defect from #84 — that text is a DOCSTRING describing a
+    fixed bug; the live code re-evaluates correctly and caches only on success.
+  * NOT a permissions problem: secrets dir is root:ubuntu 750 traversable,
+    `automation_ed25519` is ubuntu:ubuntu 600, `admin_password` root:ubuntu 640
+    and the unit runs `User=ubuntu` (in group ubuntu).
+  * The exporter IS alive and scraping — its journal shows per-cycle
+    `docker exec ... vtysh -c 'show bgp summary json'` against host containers.
+    HOST scrapes work; SWITCH scrapes fail, silently, with nothing in the journal.
+
+Next place to look: the switch scrape path specifically (not the host one), and
+why a failure there produces no log line at all — a silent per-switch failure is
+its own defect regardless of the cause.
+
+## D2 — why the stale kernel addresses reappeared on exactly three leaves
+
+Repaired and detectable (t88), root cause of the RE-ADDING agent unknown. Push
+procedure, artifact write times and container restart timings are
+indistinguishable from the backend leaves that came out clean.
+
+## D3 — `result-fabric.json` is stale
+
+Still names the 06:58 run at rc=1. Only `roles/fabric.sh` writes the
+authoritative role result; a direct `deploy.sh --from` invocation does not. The
+fabric is converged; the ROLE has no clean finish on record. Writing one requires
+running the full role, which redeploys topology — NOT worth destroying a green
+fabric for a bookkeeping record.
