@@ -241,3 +241,47 @@ Proven to discriminate: `fr-leaf02` 6 passed/5 failed, `bk-p2-r8-leaf01` and
 2. Land t88 so this cannot recur silently.
 3. Open a separate item for the unresolved re-adding agent, and for the broken
    exporter (`60-auth` never ran).
+
+---
+
+# REPAIRED — all acceptance criteria met (2026-09-05)
+
+`deploy/repair_kernel_addrs.sh` removed the addresses the artifact does not name
+on `fr-leaf01/02/03` ONLY (46 / 45 / 45). Surgical rather than a second `config
+reload`: a reload is what PRODUCED the state and its outcome is not understood,
+so repeating it hoping for a different result is not a repair. Delete set is
+(kernel MINUS artifact), so a rendered address cannot be removed by construction;
+the tool re-measures afterwards and asserts the end state rather than the rc.
+
+Verified by t88, not by the tool's own claim: `fr-leaf01/02/03` each **9 passed,
+0 failed**, including the `ip route get` egress predictor. On-box BGP immediately
+after: fr-leaf01 54/54, fr-leaf02 56/56, fr-leaf03 54/54, fr-spine01 6/6,
+fr-spine02 6/6.
+
+## Acceptance — ALL MET
+
+    exact SoT <-> model identity   t02-sot 8/0
+    cables                         1466
+    BGP                            1464/1464
+    EVPN                           16/16 Established AND Exchanging
+    VTEPs                          3/3
+    configuration verification     t11-config-applied 11/0
+    new frozen t76 baseline        t76-s1-baseline 15/0
+
+Every previously-red suite recovered: t03 14/3 -> 17/0, t13 10/1 -> 11/0,
+t39 63/2 -> 65/0, t44 29/2 -> 31/0, t41 85/1 -> 86/0. Gate: 9 failed phases -> 4.
+
+## The 4 remaining phases are BOOKKEEPING, not fabric health
+
+- `deploy-results` / `roles-head` — `result-fabric.json` is STALE, still naming
+  the 06:58 run, and one stage has no artifact. The fabric role never completed
+  end to end because stage 50 aborted at its convergence gate; `60-auth` and
+  `98-spot-rebuild` have still never run. The fabric is converged; the ROLE has
+  not recorded a clean finish.
+- `provenance` / `host-pull` — SELF-INFLICTED. `repair_kernel_addrs.sh` was
+  copied onto the fabric host while unpushed, and 4 docs commits were pushed that
+  the hosts have not pulled.
+
+To close them: land `t88` and `repair_kernel_addrs.sh`, sync both hosts, then run
+`deploy.sh --from 60-auth` so the role writes a clean result. None of that
+changes fabric state.
