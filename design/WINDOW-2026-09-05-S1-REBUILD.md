@@ -504,3 +504,58 @@ Teardown obligation applies, with evidence of deletion.
 t89 was committed unregistered and ran NOWHERE — the identical defect fixed for
 t88 earlier the same day. It is now registered in the same commit as the test.
 The lesson is that "commit the test" and "wire the test" are one action, not two.
+
+---
+
+# D5 (NEW) — the disposable host cannot run deploy.sh at all
+
+Found by a seed-only smoke that cost ~30 minutes and ZERO switch VMs. It is a
+TOOLING gap, not a fabric or D4 problem, and it blocks D4's integration evidence.
+
+`a4-host.sh sync` tars the working tree, so `/opt/gpufab/gpufab-{platform,network}`
+have **no `.git`**. Stage 00 therefore takes its CLONE path, which:
+
+    !! platform: clone FAILED: destination path already exists and is not empty
+    !! network:  clone FAILED: destination path already exists and is not empty
+    !! docs:     clone FAILED: Unable to read current working directory
+    bootstrap complete            <- all three failures treated as NON-FATAL
+
+and in the process DELETES both trees. Measured after the run: platform 0 files,
+network 0 files, and every later stage dies with
+`bash: ./10-images.sh: No such file or directory` because stage 00 removed its
+own working directory. `GPUFAB_NO_RESET=1` does not prevent this — it governs the
+reset, not the clone.
+
+Recovery by cloning is also unavailable: the host cannot reach GitHub
+(`git ls-remote` fails) even though 3 key files exist under `secrets/`.
+
+**Two defects in one, both worth fixing separately:**
+  1. `a4-host.sh` ships a tree that stage 00 cannot consume. The host was built
+     for the unit-executor arms, which drive containerlab directly and never run
+     deploy.sh.
+  2. Stage 00 treats THREE failed clones as non-fatal and continues to print
+     "bootstrap complete" while having deleted the code it was bootstrapping.
+     That is the project's signature failure shape — the stage reported success
+     for work it had destroyed.
+
+## Consequence for D4
+
+**Integration evidence is still NOT obtained.** D4's host-free evidence stands
+(t89 6/0, 38/38 switch configs byte-identical, 1831/0 suite); nothing has yet
+shown the export policy suppresses host transit on a running fabric. D4 remains
+HELD and unpromoted.
+
+Two ways forward, neither improvised on a burning VM:
+  * teach `a4-host.sh` to create real git checkouts (and give the host GitHub
+    reachability), then re-run smoke -> s0-64; or
+  * qualify on a terraform-provisioned sim host, which already has both.
+
+## The smoke-first strategy worked
+
+This is the case FOR it, not against. The blocker is at stage 00 — before a
+single switch boots — so a `--until 30-seed` smoke found it in ~30 minutes with
+no fabric built. The previous attempt spent a VM discovering the same class of
+problem and produced nothing. Cost of the smoke: one stage list and no switches.
+
+Teardown: VERIFIED both times — instance absent, no orphaned disks, no orphaned
+addresses, independently confirmed 0 instances / 0 disks.
