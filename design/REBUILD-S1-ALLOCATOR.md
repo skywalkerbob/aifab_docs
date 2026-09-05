@@ -69,6 +69,34 @@ ADDRESS space, while port rank is taken over the ACTUAL peer set, so a different
 node mix per pod moves switch ports while every address holds. Measured: a GPU's
 `bmc0` moving `Ethernet96` → `Ethernet72`.
 
+### Collateral: measured, not assumed
+
+The whole workstation suite was run on `main` and on the branch and the verdicts
+compared per test. **54 tests both sides. Exactly three verdicts moved, and they
+are the three that were changed on purpose:**
+
+    t08-addressing     25 passed 1 failed  ->  31 passed 0 failed
+    t76-s1-baseline     7 passed           ->  15 passed
+    t77-micro-fixture  22 passed           ->  26 passed
+
+    suite rc                     main 1    ->  branch 0
+    total assertions          main 1652    ->  branch 1670
+
+The other 51 are identical. t76 and t77 gain assertions rather than change them
+because the rebaseline checks are NEW — and t08 gains six because the rung sweep
+now covers boundaries that were previously not compared at all.
+
+An unchanged verdict only means something if the test ran, so the map/model
+consumers were checked individually for a non-zero assertion count: t06 15, t09
+74, t14 25, t26 45, t43 38, t46 19, t72 17, t80 15, t84 24, t85 17 — all
+identical across the two arms.
+
+**Six consumers are host-bound and CANNOT be checked before the window:** t03
+(fabric), t13 (BGP peer truth), t38 (VXLAN), t39 (VTEP truth), t56 (forwarding),
+t57 (reachability matrix). That is the residual risk, and it is exactly what the
+acceptance below exercises — which is why the acceptance is the gate and the
+host-free green is only permission to open the window.
+
 ## The window
 
 1. Land the branch: allocator, baselines and tests together, in one push, so
