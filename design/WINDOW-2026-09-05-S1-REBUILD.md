@@ -1,8 +1,12 @@
 # S1 rebaseline window, 2026-09-05 — STOPPED CLOSED, frontend will not converge
 
-**Status: the rebuild FAILED and the window is stopped closed. Nothing is being
-retried. The fix exists and is HELD, unpushed, on `gpufab-network` branch
-`render-rrev-fix` (`c9c6b83`).**
+**Status: stopped closed. The `rrev` fix IS LANDED (`gpufab-network` main
+`c9c6b83`) and it worked — the render succeeds and 46 switches carry config that
+matches intent. What remains RED is convergence: BGP 1387/1464 and EVPN 8/16,
+with the entire shortfall in the FRONTEND fabric. Nothing is being retried.**
+
+The sections below are in chronological order; the last one is the current
+state.
 
 Read this before touching `gpufab-fabric-01`, `gpufab-ops-01`, or
 `render_fabric_ztp.py`.
