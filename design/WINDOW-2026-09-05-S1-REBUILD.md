@@ -1,4 +1,4 @@
-# S1 rebaseline window, 2026-09-05 — STOPPED CLOSED at stage 50
+# S1 rebaseline window, 2026-09-05 — STOPPED CLOSED, frontend will not converge
 
 **Status: the rebuild FAILED and the window is stopped closed. Nothing is being
 retried. The fix exists and is HELD, unpushed, on `gpufab-network` branch
@@ -104,3 +104,68 @@ The SoT and the cabling are already correct, so a full rebuild is not required:
 Add a static undefined-name gate (pyflakes over both `tools/` trees) to the
 suite. It reproduces this defect in milliseconds and would have caught it before
 the window opened.
+
+
+---
+
+# Resume attempt (authorized) — fix landed, gate RED on frontend convergence
+
+`c9c6b83` (the `rrev` fix) was pushed to `gpufab-network` main, stage 00 pulled it
+onto `gpufab-fabric-01`, and the fabric role was resumed with
+`deploy.sh --from 50-ztp-provision`.
+
+**The render fix worked.** Stage 50 rendered, swapped the tree, recreated
+`gpufab-ztp-oob`, and pushed config: **38 switches reloaded+VERIFIED, 8 already
+in sync, 0 VERIFY-FAILED, 75 hosts configured**. No NameError.
+
+**It then failed at its convergence gate**: `fabric: 1387/1464 sessions
+Established (waited 602s)` -> `[FAIL] config-push backfill failed`. That message
+is misleading — the switches DO have routing config; the gate is about
+convergence, and `60-auth` / `98-spot-rebuild` never ran as a result.
+
+## Gate result
+
+    BGP sessions ESTABLISHED      1387   expected 1464
+    EVPN sessions ESTABLISHED        8   expected 16
+
+Green and worth recording: `t02-sot 8/0`, `t11-config-applied 11/0` (what is ON
+the box equals what was rendered FOR it), `t43-topology-truth 45/0`,
+`t57-reachability 12/0`, `t38-vxlan 27/0`, `t50-evpn-durability 82/0`, and
+**`t76-s1-baseline 15/0` — the new frozen baseline holds against the live
+fabric.** The allocator and the rebaseline are not in question.
+
+## The shortfall is ENTIRELY frontend, and it is stuck
+
+    dc1-pod001-fr-leaf01    43/51        dc1-pod001-bk-p2-*      34/34, 16/16  OK
+    dc1-pod001-fr-leaf02    15/52        dc1-pod001-st-leaf*     48/48, 50/50  OK
+    dc1-pod001-fr-leaf03    23/51        dc1-pod001-st-spine*    3/3           OK
+    dc1-pod001-fr-spine01    1/3
+    dc1-pod001-fr-spine02    1/3
+
+83 of the frontend's 160 expected series. 160-83 = 77 = exactly 1464-1387.
+Backend (1152) and storage (152) are fully established. EVPN 8/16 is the same
+frontend half.
+
+FOUR independent suites (t03, t13, t41, t44) read 1387 at different points across
+the gate's run, so this is STUCK, not still converging.
+
+**Do not read the exporter here.** It reported `gpufab_bgp_peer_up up=0
+down=1464` and `mgmt_reachable 0/48` while the boxes were at 1387 and the mgmt
+IPs answered ping. The on-box reads are the truth; the exporter is broken
+(plausibly because `60-auth` never ran) and is itself a defect to chase.
+
+## Also outstanding
+
+`gpufab-ops-01` is drifted: `render_fabric_ztp.py` differs from git, and network
+and docs are each 1 commit behind. Stage 00 was run on the FABRIC host only.
+Harmless for this render (`OOB_MODE=local` renders fabric-side) but it must be
+synced before anything trusts that host.
+
+## State
+
+SoT correct; cabling correct and reconciled; 46 switches configured with config
+matching intent; frontend BGP/EVPN will not converge; `60-auth` and
+`98-spot-rebuild` never ran. Automation (`bot`/`relay`/`runner`) closed. Backups
+untouched and restorable.
+
+**Stopped closed. No further action taken.**
