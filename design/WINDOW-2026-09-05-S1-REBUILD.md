@@ -441,3 +441,66 @@ command substitution, even in a comment. It ran `hit` on every iteration.
 The through-line matches the freeze rationale: controls prove an instrument
 distinguishes states; they do NOT prove its oracle describes the right property.
 Independence is not sufficiency.
+
+---
+
+# D4 IN QUALIFICATION — fix built, host-free evidence complete, HELD
+
+**Not promoted. Held on branch `qual-d4-host-export` in both repos:**
+
+    gpufab-network   829d80b  render: a host advertises only what it originates
+    gpufab-platform  490c504  tests(t89) + verify.sh registration
+
+They must land TOGETHER: t89 asserts the new behaviour and would be red against
+the frozen platform, which does not have the fix.
+
+## The fix
+
+Match on AS_PATH `^$` — an empty path is exactly "originated by me" — rather than
+enumerating prefixes, which would need regenerating whenever a host's addressing
+changed and would go stale silently. Explicit deny, so the intent survives
+someone appending a later permit.
+
+## Two defects caught before any host ran it
+
+1. **`to_frr_conf()` renders SWITCHES as well as hosts** (`render_fabric_ztp.py`
+   :1276 vs :1478). The first draft emitted the policy unconditionally, which
+   would have restricted SWITCH exports to locally-originated prefixes — every
+   transit route in the fabric gone, while every BGP session stayed Established.
+   Now opt-IN via `originate_only=False`, set by the host call site only and
+   never inferred from the intent.
+2. **The policy was attached to nothing.** First placed beside
+   `neighbor <port> activate`, which runs only on the UNNUMBERED path, so under
+   `p2p=numbered` the route-maps were rendered and referenced by no neighbour.
+   t89 caught it as 0 of 8 hosts applying it: PRESENT, no EFFECT. It now attaches
+   in its own loop using the identifier matching how the neighbour was DECLARED —
+   `peer_ip` when numbered, `port` when not.
+
+## Host-free evidence — COMPLETE
+
+    t89-host-originate-only         6 passed  0 failed
+    switch frr.conf byte-identity   38 of 38 UNCHANGED
+    host frr.conf changed            8 of 8 (intended)
+    device set                       identical
+    full host-free suite          1831 passed  0 failed
+
+## Integration evidence — NOT DONE, required before promotion
+
+Per the reopen rule, a qualification-lane change is promoted only with completed
+acceptance evidence, and the remaining gap is that none of the above proves the
+policy suppresses host transit ON A RUNNING FABRIC, or that switch transit
+survives it. That needs a DISPOSABLE host (`deploy/checks/a4-host.sh`), with
+acceptance:
+
+  * `experiments/e1-transit-policy.sh` goes PASS (currently FAIL, 6/6 leaves)
+  * `experiments/e1-ecmp-width.sh` oracle matches the box: 81 destinations,
+    {w1=34, w2+=47}
+  * switch-to-switch transit still works — the fabric still converges
+
+Teardown obligation applies, with evidence of deletion.
+
+## Process note
+
+t89 was committed unregistered and ran NOWHERE — the identical defect fixed for
+t88 earlier the same day. It is now registered in the same commit as the test.
+The lesson is that "commit the test" and "wire the test" are one action, not two.
