@@ -173,3 +173,71 @@ matching intent; frontend BGP/EVPN will not converge; `60-auth` and
 untouched and restorable.
 
 **Stopped closed. No further action taken.**
+
+---
+
+# ROOT CAUSE (2026-09-05) — stale kernel addresses on the three frontend leaves
+
+**Not the allocator. Not the in-sync skip. A failed cleanup BELOW CONFIG_DB.**
+
+`fr-leaf01/02/03` came out of their config reload holding BOTH the pre- and
+post-rebaseline interface->IP layouts in the kernel at once:
+
+    Ethernet28   10.128.10.192/31  10.128.0.35/31    <- stale uplink + real downlink
+    Ethernet252  10.128.10.192/31                    <- the CORRECT uplink
+    Ethernet200  10.128.9.169/31                     <- not in CONFIG_DB at all
+
+    ip route get 10.128.10.193  ->  dev Ethernet28   (a GPU port)
+    CONFIG_DB and the artifact  ->      Ethernet252   (the spine uplink)
+
+44 of 54 addressed interfaces held two addresses. The kernel picks a connected
+route arbitrarily, so a session establishes IF AND ONLY IF it happens to pick the
+correct copy — which is why the counts were RAGGED (43/51, 15/52, 23/51) instead
+of all-or-nothing, and why the 8 missing EVPN sessions ride the 77 missing
+underlay ones. Route selection predicts BGP state exactly, peer by peer.
+
+**Blast radius, measured across all 46 comparable switches:** exactly three.
+
+    dc1-pod001-fr-leaf01  46 extra addresses
+    dc1-pod001-fr-leaf02  45
+    dc1-pod001-fr-leaf03  45
+    every other switch     0        0 unreachable, 0 rendered-but-missing
+
+**The control that exonerates the allocator:** `bk-p2-r8-leaf01` underwent an
+IDENTICAL remap (`Ethernet0|10.128.10.180` -> `Ethernet252|10.128.10.180`, in its
+syslog) and came out clean. The rendered artifacts are correct and CONFIG_DB
+matches them byte-for-byte on every device checked (104 keys, 0 box-only, 0
+render-only). The allocator change is the OCCASION — it is what made old and new
+differ, so a failure to remove the old became visible — not the defect.
+
+`intfmgrd` logged EEXIST ~47s AFTER syncd recreated the interfaces, on precisely
+the bindings common to both layouts, i.e. the old addresses were already back:
+
+    08:35:49 setIntfIp: '/sbin/ip address "add" "10.128.10.1/31" dev "Ethernet0"' failed rc 2
+
+`bk-p2-r8-leaf01`: zero such failures. **Why the stale addresses reappear on
+exactly those three leaves is UNRESOLVED** — push procedure, artifact write times
+and container restart times are indistinguishable across frontend, backend and
+storage.
+
+## Why every check was green, and honest
+
+`t11-config-applied`, `interim_deploy`'s read-back, and stage 48 compare
+CONFIG_DB to the artifact, or wiring to the SoT. The defect is a SUPERSET living
+in the netlink layer below anything they describe. Nothing measured the kernel.
+
+`tests/t88-kernel-address-truth.sh` now does (HELD on branch
+`kernel-address-truth`, `8e5c1f9`). It asserts set equality in BOTH directions —
+an address on the box the artifact does not name is a FAILURE, not an ignored
+extra — plus `ip route get <neighbour>` egressing the render-assigned port.
+Proven to discriminate: `fr-leaf02` 6 passed/5 failed, `bk-p2-r8-leaf01` and
+`st-leaf02` 9 passed/0 failed, full sweep 183/11 naming exactly the three.
+
+## Recommended fix — NOT APPLIED
+
+1. On `fr-leaf01/02/03` ONLY: flush the kernel addresses and re-apply from
+   CONFIG_DB, then confirm with `ip route get <peer>` before believing it.
+   **Do not touch the spines — they are correct.**
+2. Land t88 so this cannot recur silently.
+3. Open a separate item for the unresolved re-adding agent, and for the broken
+   exporter (`60-auth` never ran).
