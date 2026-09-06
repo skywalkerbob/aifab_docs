@@ -117,3 +117,68 @@ Disposable host deleted; `A4 HOST TEARDOWN: VERIFIED`, independently confirmed
 Apply the existing EVPN feature layer through the unit-lab configuration path and
 rerun the disposable S2 EVPN acceptance. Do not reopen S1. Do not investigate
 unrelated backlog during that work.
+
+---
+
+# ADDENDUM — S2 + EVPN attempt, same day: LOST to a substrate limit (D7)
+
+The D6 fix was carried onto a fresh disposable host and the run reached the
+config push before the HOST's own networking failed. **No EVPN measurement was
+obtained.** D6 remains unproven at integration; it is not disproven either.
+
+## What was established before the loss
+
+    reset            984 stale objects cleared
+    seed             14150 objects — 106 switches, 152 hosts, 3332 links
+                     SoT verified 258/258 devices, 3332/3332 cables   GATE-PASS
+    boot             106/106 SONiC guests healthy
+    D6 delivery      44 manifest.json written under the push's artifact root
+                     (ZERO existed on the previous run — the fix demonstrably works
+                     as far as delivery goes)
+
+## D7 — networkd-dispatcher does not scale to S2's interface count
+
+S2's 3332 links mean ~6664 veth interfaces. Measured from the serial console:
+**highest ifindex 8141, and 1652 "reloading interface list" storms.**
+
+    networkd-dispatcher: ERROR: Unknown interface index 7013 seen even after reload
+                         WARNING: Unknown index 6566 seen, reloading interface list
+                         (a new PID per event, hundreds per second)
+
+It reloads its ENTIRE interface list on every netlink event and spawns a process
+each time. At this interface count it never converges. It starved the host's own
+networking: `169.254.169.254` (link-local metadata) became `network is
+unreachable` at 18:26:37 and sshd stopped answering, while the instance stayed
+RUNNING. Not OOM (memory held at 443/503 GB), not neighbour-table overflow, not
+conntrack exhaustion — all three checked and absent.
+
+The previous S2 run survived this marginally; this one, with the D6 fix adding
+per-device artifact writes and more SSH sessions, crossed the line.
+
+**This is a HOST-side service, not a fabric component.** `networkd-dispatcher` is
+not required by containerlab, SONiC or the deploy. The obvious mitigation —
+untested — is to mask it on the qualification host before deploying at S2 scale.
+That is a one-line host provisioning change, NOT a fabric or platform change.
+
+## Cost and disposition
+
+~2h20m on one disposable host, deleted; A4 HOST TEARDOWN VERIFIED, independently
+confirmed 0 instances / 0 disks. Frozen S1 untouched throughout — different host,
+different mgmt range, never contacted.
+
+Three of my own errors cost ~15 minutes before the real run started, all caught
+by gates rather than by damage: an unquoted heredoc emptied NETBOX_URL (the stage
+REFUSED rather than defaulting to loopback), the same heredoc emptied PROFILE so
+the seed built s0-64 (the gate caught 43/43 against an expected 258/258), and the
+fix for both was to stop generating scripts with unquoted heredocs and pass
+values as arguments instead.
+
+## Status
+
+    D6   fix built, host-free proven (t90 5/0, RED without it). Integration
+         evidence NOT obtained. Still the sole blocker to a COMPLETE S2.
+    D7   NEW. networkd-dispatcher storms at ~6664 veths and kills host
+         networking. Blocks any S2-scale vm-fidelity run until mitigated.
+
+S2 at L3 remains qualified from the earlier run (3728/3728). Nothing about that
+result is affected by this attempt.
