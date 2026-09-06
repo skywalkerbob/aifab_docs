@@ -559,3 +559,71 @@ problem and produced nothing. Cost of the smoke: one stage list and no switches.
 
 Teardown: VERIFIED both times — instance absent, no orphaned disks, no orphaned
 addresses, independently confirmed 0 instances / 0 disks.
+
+---
+
+# D4 QUALIFIED — integration evidence obtained on a disposable host
+
+Fabric: s0-64 on `gpufab-a4-01`, 30 SONiC switches + 12 host emulators,
+**249/249 BGP sessions Established**. Host deleted afterwards; teardown VERIFIED
+and independently confirmed (0 instances, 0 disks).
+
+s0-64 was chosen because it reproduces the defect's structural precondition
+exactly — 5 disconnected switch components `[10,10,4,4,2]` vs S1's
+`[18,18,5,5,2]`, with ALL hosts multi-homed across more than one. Verified
+host-free BEFORE provisioning. Small scale is a valid vehicle only when the
+invariant the defect depends on is named and shown to hold.
+
+## The first fix did nothing, and only a running fabric could show it
+
+    rendered frr.conf for gpu0006     22 policy lines
+    running config on gpu0006          0 policy lines, no route-map out
+    /etc/frr/frr.conf on the box       DOES NOT EXIST
+    yet all 12 hosts logged            "host configured rc=0"
+
+Root cause: a SECOND DERIVATION. `frr_render.to_frr_conf()` produces the rendered
+ARTIFACT; hosts are configured by `interim_deploy.deploy_host()`, which builds
+its own vtysh command list and never reads that artifact. The fix went into the
+artifact; the fabric runs the other path.
+
+FRR was not the obstacle — applying `bgp as-path access-list ORIGINATE-ONLY
+permit ^$` by hand on FRR 10.2.1 was accepted immediately.
+
+`3ba62fd` puts the policy on the applied path. Note what `deploy_host` emits two
+lines above it: `no bgp ebgp-requires-policy`. RFC 8212 would otherwise BLOCK
+eBGP advertisement absent an explicit policy, so that one line is what permitted
+hosts to re-advertise everything. The fix supplies the policy RFC 8212 asked for.
+
+## Acceptance — MET
+
+                                   before          after
+    policy in RUNNING config       0 lines         route-map out on every nbr
+    destinations via compute       38-39/leaf      0 on all 6 leaves
+    /32 prefixes visible           39              18 (phantom paths gone)
+    host-origin paths (neg ctrl)   present         16-24, still present
+    fabric                         249/249         249/249 Established
+
+`e1-transit-policy.sh`: **FAIL 6/6 -> PASS 6/6**. Switch transit intact.
+
+## t89 passed honestly throughout, and that is the lesson
+
+t89 asserts the ARTIFACT, which was always correct. **No check compares a HOST's
+running config to what was rendered for it** — `t11-config-applied` does that for
+switches only. That gap is why a fix could be complete, tested, green, and inert.
+It is worth its own test, and it is the same shape as the stale-kernel-address
+finding: rendered != applied, with every check green.
+
+## Also delivered
+
+`6cf57c5` — D5: `a4-host.sh` syncs REAL git checkouts via git bundles. Previously
+it tarred a tree with no `.git`, so stage 00 took its clone path, failed three
+times, treated all three as non-fatal, printed "bootstrap complete" and DELETED
+both repo trees. Bundles need no GitHub reachability and no deploy key; the host
+verifies each repo's HEAD against the workstation's value.
+
+## Promotion status
+
+D4 now has host-free AND integration evidence. It remains HELD pending Bob's
+decision: promoting it moves `network/tools` and `platform/deploy`, both PINNED
+behavioural trees, so it is a deliberate reopen of the freeze under rule 3
+(a qualification-lane change with completed acceptance evidence).
