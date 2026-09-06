@@ -4,6 +4,14 @@ Status: **NOT APPROVED, rev 9.** Not authorized for implementation. This is a
 problem statement, not a plan: it records what is built, what is not, and what
 must be settled before anything is.
 
+> **2026-09-06 — multi-host was NOT required for S2.** At `host_ram_gb=512` the
+> model's placement collapses to ONE host with `cross_links=0`; the 2-host,
+> 200-cross-link placement is an artifact of the profile declaring
+> `fleet_machine: n2-highmem-32`. S2 was qualified single-host on an
+> `n2-highmem-64`: 258/258 devices, 3332/3332 cables, 3728/3728 BGP. Nothing in
+> this document was implemented or needed. Measurements:
+> RUN-2026-09-06-S2-QUALIFICATION.md.
+
 Review history, all findings verified against the sources before acceptance:
 
 - **rev 1 → rev 2**, five blockers. Rev 1 called the infrastructure "built" when
