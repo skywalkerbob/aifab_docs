@@ -10,7 +10,12 @@ must be settled before anything is.
 > `fleet_machine: n2-highmem-32`. S2 was qualified single-host on an
 > `n2-highmem-64`: 258/258 devices, 3332/3332 cables, 3728/3728 BGP. Nothing in
 > this document was implemented or needed. Measurements:
-> RUN-2026-09-06-S2-QUALIFICATION.md.
+> RUN-2026-09-06-S2-QUALIFICATION.md. That run carried EVPN at 0/0 (D6); D6 was
+> closed on 2026-09-07 in the served ZTP tree, not the push path, and accepted
+> on one unit (16/16 self-provisioned, EVPN tables on-box equal to rendered,
+> 4/4 EVPN peerings established, tenant path forwarding):
+> RUN-2026-09-07-D6-MICRO-ACCEPTANCE.md. Multi-unit serving and scale remain
+> unproven there.
 
 Review history, all findings verified against the sources before acceptance:
 
