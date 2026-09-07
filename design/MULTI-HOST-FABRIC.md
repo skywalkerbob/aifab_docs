@@ -14,8 +14,11 @@ must be settled before anything is.
 > closed on 2026-09-07 in the served ZTP tree, not the push path, and accepted
 > on one unit (16/16 self-provisioned, EVPN tables on-box equal to rendered,
 > 4/4 EVPN peerings established, tenant path forwarding):
-> RUN-2026-09-07-D6-MICRO-ACCEPTANCE.md. Multi-unit serving and scale remain
-> unproven there.
+> RUN-2026-09-07-D6-MICRO-ACCEPTANCE.md, then accepted at FULL S2 SCALE the
+> same day through the ZTP unit path: 106/106 switches self-provisioned across
+> 3 units and 3 servers, t92 15/15 on each pod, t93 7/7 —
+> RUN-2026-09-07-S2-ZTP-ACCEPTANCE.md. Still single-host; nothing in this
+> document was implemented or needed.
 
 Review history, all findings verified against the sources before acceptance:
 
