@@ -117,17 +117,82 @@ first version conflated: a body that will not parse is UNREADABLE, while a body
 that parses with no peers key is a MEASUREMENT OF ZERO, which must fail the
 count rather than be laundered into "unreadable".
 
+## Multi-unit run, same day — three units, three servers
+
+`c12 --ztp` (new mode: skip the interim push, serve instead) built all three
+micro units and `deploy/ztp_serve_units.sh` served one ZTP server per unit at
+that unit's own derived address.
+
+**All 38 switches self-provisioned**, from three separate servers:
+
+    dc1-pod001  ack=48  config_db fetched by 16/16
+    dc1-pod002  ack=48  config_db fetched by 16/16
+    core        ack=18  config_db fetched by  6/6
+
+That closes "multi-unit serving is unproven". It required two fixes found by
+the run itself:
+
+* **The core shard's derived ZTP address was a switch.** `mgmt_infra()` lays out
+  a POD's subnet, where devices start above the reserved low addresses; a core
+  shard's devices start at .2, so the pod-shaped .4 was
+  `clab-c12-core-dc1-ba-core003`. Docker refused with `Address already in use`
+  — the good outcome; had the server won that race a switch could not have
+  taken its own management address. Core shards now take addresses from their
+  own subnet (`.252`), pods are unchanged, and t91 asserts no device holds its
+  unit's gateway/tacacs/ztp address (21 pairs across micro, S1 and S2).
+* **The unit-address check was a race, not a check.** A single probe moments
+  after `docker run` reported "does NOT answer" for a server whose dnsmasq was
+  already sending the correct opt67 URL. Bounded retry; "not up yet" is not
+  "does not answer".
+
+t92 per unit, with all three deployed:
+
+    dc1-pod002   13 passed  0 failed
+    dc1-pod001   12 passed  3 failed   (see D8 below)
+    core          1 passed  0 failed  1 skipped — NOT APPLICABLE, no VTEPs
+
+The expectation itself had to be corrected first, and this is worth recording
+because the wrong version was mine: t92 expected every VTEP to see every other
+deployed VTEP. `features.evpn` names the transits for micro-2pod as the two POD
+frontend spines — not the core — so the overlay is **one domain per pod** and
+each VTEP has exactly one peer VTEP. The original expectation asserted a
+fabric-wide domain nobody declared and failed dc1-pod002, which was correct.
+The expectation is now the connected component over {vteps + transits} in the
+model's own links.
+
+## D8 (new, NOT D6): a VTEP whose FRR has no EVPN address-family
+
+`dc1-pod001-fr-leaf01` ended the run with its EVPN **config_db correct and
+identical to its working pod-mate** — same 31 tables, same key counts, differing
+only in `bgp_asn`, `hostname` and `mac` — while its FRR carried no
+`address-family l2vpn evpn` at all. Its peer sees it as `NoNeg`; `show evpn vni`
+returns nothing; both its VNIs show 0 remote VTEPs.
+
+Neither `systemctl restart bgp` nor `config reload -y -f` changed it.
+
+So the defect is BELOW config_db, in SONiC's own generation of FRR config from
+it, and it is intermittent: 1 of 4 VTEPs in this run, 0 of 4 sampled in the
+single-unit run, both pod002 VTEPs fine. It is not a gpufab derivation gap and
+not D6, and chasing it further is a SONiC investigation rather than a
+management-unit one.
+
+t92 caught it. The VXLAN-table comparison passed — correctly, the tables ARE
+right — and the remote-VTEP assertion is what failed. That is the layer
+argument working in the intended direction for once.
+
 ## What this does NOT establish
 
-* **Multi-unit serving is unproven.** This is one unit, one ZTP server. S2 has
-  three units, each with its own management subnet and its own server, and
-  nothing here demonstrates three of them running at once.
+* ~~Multi-unit serving is unproven~~ — closed above: 38/38 across three units
+  and three servers.
 * **The tenant dataplane check did not cross a remote VTEP.** Within one unit
   the hosts are dual-homed to both of that unit's VTEPs, so the path exercises
   the VLAN, the anycast gateway and the leaf pair. Remote-VTEP visibility is
   covered by the separate assertion; a cross-VTEP forwarding path needs a
   second unit and is not claimed.
-* **Scale is unproven.** 16 switches, not 258.
+* **Scale is unproven.** 38 switches across three units, not 258.
+* **Cross-VTEP forwarding is still not asserted.** The model puts each pod's
+  VTEPs in their own EVPN domain, so there is no cross-pod overlay path in this
+  topology to test. The tenant check remains within-unit.
 * **The source was the PROFILE, not NetBox.** `unit_ztp.py` calls
   `render_bundle(profile, devices, server=...)` — the same renderer the product
   path uses, so there is no second rendering authority, but a different SOURCE.
