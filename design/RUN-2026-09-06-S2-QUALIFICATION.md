@@ -182,3 +182,76 @@ values as arguments instead.
 
 S2 at L3 remains qualified from the earlier run (3728/3728). Nothing about that
 result is affected by this attempt.
+
+---
+
+# ADDENDUM 2 — 2026-09-07: D7 PROVEN, D6 REFUTED as a plumbing problem
+
+Full S2 run on a disposable `n2-highmem-64` with both fixes carried. Host deleted;
+teardown verified. Frozen S1 untouched.
+
+## Result
+
+    c12 VERDICT: OK      rc=0, 254 device(s) configured, ~2h15m deploy
+    BGP                  3728 / 3728 established, 0 unreadable
+    EVPN                 0 / 0                      STILL ZERO
+
+## D7 — PROVEN
+
+Masking `networkd-dispatcher` at provision time held. The host survived the entire
+deploy where the previous attempt lost its networking at 66 minutes. The readiness
+marker refuses unless the mask is confirmed, so this cannot silently regress.
+BGP 3728/3728 shows the mask broke nothing.
+
+## D6 — the fix was necessary but NOT sufficient, and the diagnosis was incomplete
+
+The artifacts were delivered correctly. Measured on `dc1-pod002-fr-leaf03`:
+
+    artifact manifest declares   VLAN, VLAN_INTERFACE, VXLAN_EVPN_NVO,
+                                 VXLAN_TUNNEL, VXLAN_TUNNEL_MAP
+    artifact config_db           1 VXLAN_TUNNEL entry
+    ON THE BOX                   VXLAN_TUNNEL empty, VLAN empty,
+                                 l2vpn evpn lines 0
+
+And the push is not broken -- it applies what it builds:
+
+    box BGP_NEIGHBOR   51 entries
+    box INTERFACE     104 entries
+
+**ROOT CAUSE, corrected.** `deploy_switch` builds the config it pushes from its
+OWN intent derivation -- interfaces, loopbacks, BGP neighbours -- and pushes that.
+The rendered artifact is consulted only for the SKIP and VERIFY decisions
+(`artifact_config_for()`, as ownership()'s docstring states), NEVER as a source of
+config. So the artifact's feature tables cannot land through this path no matter
+how correctly they are delivered. Delivering the manifest changes what may be
+REMOVED (the drop floor); it does not change what is WRITTEN.
+
+This is the SAME second-derivation shape as D4, one level up: the render and the
+push each derive device config independently, and the push's derivation has no
+concept of the EVPN feature layer.
+
+## Why this stops here
+
+Closing D6 now requires ONE OF:
+
+  a) `deploy_switch` merging the rendered artifact's feature tables into what it
+     pushes -- a change to how config is applied for EVERY device in EVERY fabric;
+  b) the unit path serving artifacts over ZTP and letting switches self-provision
+     -- which is how S1 obtained EVPN, and what deploy.sh calls "the real product
+     path".
+
+Both are design decisions with real blast radius, not plumbing. The agreed scope
+was to invoke the existing EVPN layer, not to change how configuration is applied,
+so this stops and reports rather than pushing through.
+
+**The delivered-artifact change is not wrong and is not harmful** (BGP unaffected
+at 3728/3728), but it does NOT close D6 and must not be promoted as though it
+does.
+
+## Status
+
+    D6  OPEN. Diagnosis corrected: not a delivery gap, a derivation gap. Still
+        the sole blocker to a COMPLETE S2. Needs a design decision (a) or (b).
+    D7  CLOSED pending promotion -- proven on this run.
+
+S2 at L3 remains qualified: 258/258 devices, 3332/3332 cables, 3728/3728 BGP.
