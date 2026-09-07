@@ -201,6 +201,49 @@ argument working in the intended direction for once.
   the unit path should read NetBox is a design question outside D6 and is not
   answered here.
 
+## D9 — systemd-networkd takes the HOST down at S2 scale (found, fixed, unproven)
+
+The first full-S2 attempt through the ZTP unit path reached **258 containers and
+106/106 healthy switches** and was then lost, not to the fabric but to the
+host's own networking — the same ending as D7, with networkd-dispatcher
+verified `masked` for the entire run.
+
+From the serial console (the instance stayed RUNNING throughout, sshd simply
+stopped answering):
+
+    09:03:23  systemd-networkd[1208]: br9b56d183cc69: Link DOWN
+    09:03:27  google_guest_agent: dial tcp 169.254.169.254:80:
+              connect: network is unreachable
+
+2240 systemd-networkd events across **400 distinct clab bridges** plus several
+hundred veths. D7's own comment records that systemd-networkd "is a DIFFERENT
+unit and is untouched by this" — which is exactly why masking the dispatcher
+was necessary and not sufficient. At S2 scale the other unit becomes the
+storming party.
+
+Fix (`a4-host.sh`, beside the D7 mask): a systemd-networkd drop-in matching by
+**driver** — `veth` and `bridge` — with `Unmanaged=yes`. Matching by driver
+rather than name is deliberate: those are precisely the devices containerlab
+creates and never the primary NIC (gvnic/virtio_net on GCE), whereas a glob
+like `eth*` could strand the host, and a host stranded by its own guard is
+worse than the storm it prevents.
+
+Readiness REFUSES unless the drop-in is present AND networkctl reports every
+veth/bridge unmanaged — the effect, not the file — because a host where this
+silently failed to land is indistinguishable from one where it landed, right up
+until a build dies unreachable and cannot report why.
+
+Measured on the replacement host:
+
+    bridge state : off (unmanaged)
+    veth state   : off (unmanaged)
+    ens4 state   : routable (configured)
+
+**D9's fix is verified at the mechanism and NOT yet at S2 scale.** A second full
+S2 run is what would establish that, and until it completes, "S2 through the ZTP
+path" remains unproven. What the lost run does establish, independently of D9,
+is that the unit path builds 258 devices and 106 healthy switches on one host.
+
 ## Open, recorded rather than fixed
 
 `deploy/46-mgmt-isolation.sh:42,66` match `172.20.0.*` as literals — the same
