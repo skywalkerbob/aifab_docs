@@ -128,6 +128,13 @@ count rather than be laundered into "unreadable".
   covered by the separate assertion; a cross-VTEP forwarding path needs a
   second unit and is not claimed.
 * **Scale is unproven.** 16 switches, not 258.
+* **The source was the PROFILE, not NetBox.** `unit_ztp.py` calls
+  `render_bundle(profile, devices, server=...)` — the same renderer the product
+  path uses, so there is no second rendering authority, but a different SOURCE.
+  S1 renders from NetBox as SoT. This run therefore proves
+  profile -> ZTP -> box, and says nothing about NetBox -> ZTP -> box. Whether
+  the unit path should read NetBox is a design question outside D6 and is not
+  answered here.
 
 ## Open, recorded rather than fixed
 
