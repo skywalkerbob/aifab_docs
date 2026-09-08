@@ -308,3 +308,73 @@ whole time, so the repo bought nothing. It is now skipped when gsutil is
 present, removed again if it makes apt unusable, and **readiness refuses while
 any apt source is unsigned** — verified on a fresh host: 0 unsigned sources,
 repo not added, gsutil present.
+
+
+---
+
+# Addendum 2026-09-08 — D8 fixed, and what it actually was
+
+D8 was recorded as "a VTEP whose FRR has no EVPN address-family despite correct
+config_db, below config_db in SONiC's own FRR generation". That was right about
+the layer and wrong about the cause. The cause was already written down in this
+repository, in `deploy/56-evpn-persist.sh`:
+
+> `docker_init.sh` takes the `[ -z "$CONFIG_TYPE" ]` branch on every bgp
+> container start ... and `rm -f /etc/frr/frr.conf`
+
+`ztp.json` delivers frr.conf in `00-download`, BEFORE `01-configdb-json` applies
+the config. That ordering is correct and was measured both ways — the late
+ordering is strictly worse ("the artifact is delivered perfectly and is dark").
+But it only guarantees the file is on disk *before* the config; it cannot
+guarantee the file survives, because **the deleter is the bgp container, not
+ZTP**. If that container starts in the window between the two sections — file
+present, routing mode not yet set — it deletes frr.conf through the bind mount
+and `write_default_zebra_config` CREATES a three-line stub in its place.
+Nothing fetches the real file again.
+
+That is why the box survived `systemctl restart bgp` and `config reload -f`
+unchanged: both restart a device whose frr.conf is a stub.
+
+## The fix
+
+`02-evpn-guard`, a ZTP plugin section for EVPN speakers only, running AFTER the
+config. It asserts the OUTCOME on the device: wait 90s first (FRR is still
+starting right after the reload, and an impatient guard would restart a healthy
+device for nothing), repair only if the AF is still absent, then verify.
+
+Three things the repair learned from being run against a deliberately broken
+VTEP instead of reasoned about:
+
+* **Present is not correct.** The failure state has frr.conf present and
+  non-empty. An existence check refuses to repair a device it could fix. The
+  condition is whether the file *declares* the AF.
+* **Verify what arrived** before overwriting what is there, or a 404 body or a
+  second stub gets installed and bgp restarted — success reported for a device
+  with no overlay.
+* **The management VRF is not optional.** These switches run
+  `mgmtVrfEnabled=true`: plain `curl` returns 000 in 0 ms, `ip vrf exec mgmt
+  curl` returns 200 for the same URL. A fetch that ignores it fails instantly
+  and looks like the server is down. The first two versions of the guard were
+  wrong in exactly these ways and the box said so.
+
+## Verified
+
+D8 reproduced **deterministically** rather than waited for: delete
+`/etc/sonic/frr/frr.conf` and restart bgp, and the AF goes 1 -> 0 — the same
+state observed on 2026-09-07.
+
+    before guard : AF 0, frr.conf declares AF 0
+    guard        : "address family restored", rc=0
+    after  guard : AF 1, frr.conf declares AF 1,
+                   EVPN peers 2 of 2 established, remote VTEPs 1 1
+    second run   : "address family present", rc=0, device NOT restarted
+
+The end state was measured independently of the guard's own report.
+
+## Not claimed
+
+The guard is proven against the reproduced failure and on the healthy path. It
+has not yet run as part of a full provision (the fabric it was tested on was
+provisioned before the guard existed), and the race it defends against is
+intermittent, so a clean provision does not by itself demonstrate it fired.
+`t93` asserts the guard is present and referenced; nothing yet asserts it RAN.
