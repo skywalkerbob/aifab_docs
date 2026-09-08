@@ -378,3 +378,99 @@ has not yet run as part of a full provision (the fabric it was tested on was
 provisioned before the guard existed), and the race it defends against is
 intermittent, so a clean provision does not by itself demonstrate it fired.
 `t93` asserts the guard is present and referenced; nothing yet asserts it RAN.
+
+
+---
+
+# Addendum 2026-09-08b — full provision: the guard fires, from the deploy side
+
+Asked to run a full provision and confirm the guard fires. It does — and the
+run showed that the place I had put it could never have worked.
+
+## The ZTP section could not work, and a full provision is what said so
+
+`02-evpn-guard` was a ZTP plugin section running after `01-configdb-json`. On
+every EVPN speaker of a 38-switch provision:
+
+    !Error (7) ... curl ... http://172.28.0.4/evpn_guard.sh
+    Failed to download plugin ... Marking it as FAILED
+    Halting ZTP as Configuration section 02-evpn-guard FAILED
+
+curl 7 is "could not connect". Applying config_db enables `mgmtVrfEnabled=true`
+and moves eth0 into the `mgmt` VRF, while **ZTP's own downloader runs in the
+default VRF** — so ZTP cannot fetch ANY plugin once the config has landed. That
+is the same VRF fact the guard's own fetch had already had to learn, one level
+up, and it is why this renderer has no sections after `01-configdb-json` at all.
+
+With `halt-on-failure` set, that put provisioning into a 300s retry loop. The
+regression was mine, and it blocked the thing it was meant to protect.
+
+**It recovered in place.** Re-serving the corrected tree was enough: the
+switches pick up the new ztp.json on their next retry, and all six speakers went
+FAILED -> SUCCESS within four minutes, with no rebuild.
+
+    04:22  SUCCESS=0 FAILED=3 other=3
+    04:26  SUCCESS=6 FAILED=0 other=0
+
+## Where the repair actually lives
+
+`deploy/evpn_reconcile.sh` — operator-invoked, run after provisioning, using the
+SSH access and served artifacts the deploy already has. Same stance as
+`56-evpn-persist.sh`, and for the same stated reason: no standing unattended
+agent rewriting BGP on live devices.
+
+A speaker is **a device whose own served frr.conf declares the family**. A name
+pattern or a tier would be a second answer to "who speaks the overlay" (#79).
+
+## Confirmed, on the fabric
+
+    clean run          EVPN speakers: 6   already correct: 6   repaired: 0   FAILED: 0
+
+    then, one speaker deliberately put into the D8 state
+    (rm /etc/sonic/frr/frr.conf; systemctl restart bgp  ->  AF 1 to 0)
+
+    reconcile          .. dc1-pod002-fr-leaf02: address family ABSENT — repairing
+                       evpn-guard: /etc/sonic/frr/frr.conf does not declare
+                                   'address-family l2vpn evpn' ... re-fetching
+                       evpn-guard: address family restored
+                       REPAIRED dc1-pod002-fr-leaf02
+                       EVPN speakers: 6  correct: 5  repaired: 1  FAILED: 0   rc=0
+
+    measured after     AF 1, frr.conf declares AF 1,
+                       EVPN peers 2 of 2 established, remote VTEPs 1 1
+
+    t92                dc1-pod001  15 passed 0 failed
+                       dc1-pod002  15 passed 0 failed
+
+## Two defects the reconciler had, found by running it
+
+* It counted **12** speakers on a 6-speaker fabric: `serve.sh` keeps
+  `<unit>.snap-<ts>` beside the unit and the unit discovery treated snapshots as
+  units. Double counting is the mild symptom; reconciling a live device against
+  a stale tree is the real one.
+* It looked for `evpn_guard.sh` only at the tree root, while serve.sh serves each
+  unit from its own root — so the repair path was unreachable in the layout that
+  is actually served. It reported all-OK on the run where nothing needed
+  repairing, which is exactly how that would have stayed hidden.
+
+## And a host regression, mine, from the D9 commit
+
+`networkctl reload` does not only re-read drop-ins: it reconfigures existing
+links, including the primary NIC.
+
+    systemd-networkd: ens4: Reconfiguring with .../10-netplan-ens4.network
+    systemd-networkd: ens4: DHCP lease lost
+    google_metadata_script_runner: Script "startup-script" failed with exit status 1
+
+The host never reached readiness. Two earlier hosts survived the identical
+reload purely on timing. D9 is now applied last, after all network-dependent
+work, and the script waits for the metadata server before anything judges the
+host ready.
+
+## Not claimed
+
+The guard has still never fired *during* provisioning, because it no longer runs
+there — by design. What is proven is that the deploy-side reconciler detects the
+D8 state on a real provisioned fabric and repairs it to a converged overlay.
+Nothing yet runs the reconciler automatically as part of `c12 --ztp`; it is a
+separate, deliberate step.
