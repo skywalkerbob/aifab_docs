@@ -193,7 +193,8 @@ argument working in the intended direction for once.
 * **Cross-VTEP forwarding is still not asserted.** The model puts each pod's
   VTEPs in their own EVPN domain, so there is no cross-pod overlay path in this
   topology to test. The tenant check remains within-unit.
-* **The source was the PROFILE, not NetBox.** `unit_ztp.py` calls
+* ~~The source was the PROFILE, not NetBox~~ — CLOSED 2026-09-08, see below.
+* **(original text)** **The source was the PROFILE, not NetBox.** `unit_ztp.py` calls
   `render_bundle(profile, devices, server=...)` — the same renderer the product
   path uses, so there is no second rendering authority, but a different SOURCE.
   S1 renders from NetBox as SoT. This run therefore proves
@@ -250,3 +251,60 @@ is that the unit path builds 258 devices and 106 healthy switches on one host.
 class of defect as the dnsmasq range. A unit on any other subnet silently gets
 no isolation rules and no error. Not touched: it is outside D6 and outside the
 unit contract this work was scoped to.
+
+
+---
+
+# Addendum 2026-09-08 — the SoT gap is closed and measured
+
+`unit_ztp.py` now renders from **NetBox** as well as from the profile
+(`--sot netbox|profile`, `GPUFAB_ZTP_SOT`), and `ztp_serve_units.sh` asks for
+NetBox by default. `render_bundle()` always accepted both; only this caller was
+missing.
+
+A netbox render that cannot reach NetBox **REFUSES and renders nothing** — it
+never falls back to the profile, because a silent fallback is the defect itself
+and would leave a served tree indistinguishable from a correct one. The
+connection is proven to answer before anything is rendered. The chosen source is
+recorded in `_provenance.json`, so "where did this config come from" is
+answerable from the artifact rather than from knowing which caller ran.
+
+**Measured on a disposable host, no fabric booted.** NetBox seeded from
+`micro-2pod.yaml` (stage 30 verified 50/50 devices, 222/222 cables), then the
+same unit rendered both ways:
+
+    device sets                    equal, 20 each
+    artifacts present in both      68
+    artifacts differing in CONTENT  0
+    artifacts present under one     0
+
+So `profile -> render` and `NetBox(seeded from profile) -> render` produce
+byte-identical artifacts. The round-trip is faithful, which is what makes the
+2026-09-07 S2 acceptance carry over to the NetBox path rather than having to be
+re-run.
+
+`tests/t94-sot-render-agreement.sh` asserts this and is registered in
+verify.sh in the same commit. It SKIPs without a live SoT — comparing two
+sources with only one available asserts nothing. **5 passed, 0 failed** against
+live NetBox.
+
+Two things this addendum does NOT claim: it is one unit of one fixture, not S2;
+and it compares renders to each other, not to what a switch ends up running —
+that join is t11's and t92's.
+
+## And a host defect that cost two runs
+
+`a4-host.sh` added the cloud-sdk apt repo unconditionally, signed by a key its
+own keyring lacks (`NO_PUBKEY C0BA5CE6DC6315A3`). `apt-get update` still exits 0
+— one broken source among working ones — so nothing failed there. It failed
+later, in stage 00, which exits 100 and never creates `/opt/gpufab-venv`:
+
+* the S2 build's three units rendered NOTHING ("served tree has no device
+  directory to ask for"), because serve.sh runs its renderer with `$VENV/python`;
+* the first SoT round-trip attempt refused at its first gate.
+
+Both were initially diagnosed as something else. `gsutil` was on the image the
+whole time, so the repo bought nothing. It is now skipped when gsutil is
+present, removed again if it makes apt unusable, and **readiness refuses while
+any apt source is unsigned** — verified on a fresh host: 0 unsigned sources,
+repo not added, gsutil present.
