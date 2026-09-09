@@ -163,3 +163,86 @@ Per device, before and after, and nothing wider:
   NOT-MEASURED**, not a pass and not a failure of the thing itself. It does not
   weaken the independently measured routing failure.
 * Unrelated backlog is not investigated.
+
+
+---
+
+# Repair executed 2026-09-09 — D2 closed on both leaves; acceptance NOT met
+
+Scoped repair run one device at a time, each gated before and verified after.
+**leaf02 was not touched.** No configuration was reloaded, no service restarted,
+no branch synced.
+
+## Preconditions (deploy/checks/d2-precondition.sh)
+
+Identity match, not counts — the approval was of a specific set:
+
+    dc1-pod001-fr-leaf01: stale now 46, approved 46 — exact identity match, rendered set complete
+    dc1-pod001-fr-leaf03: stale now 45, approved 45 — exact identity match, rendered set complete
+
+## leaf01
+
+    repaired — removed 46; kernel now equals the rendered set exactly
+    t88: kernel holds no address the render did not assign     PASS
+         every rendered address is bound in the kernel          PASS
+         all 4 sampled neighbours route out their assigned port PASS
+    adjacencies: 51/51 established, stable over 6 polls (~4 min)
+
+Only then was leaf03 touched.
+
+## leaf03
+
+    repaired — removed 45; kernel now equals the rendered set exactly
+    t88 FLEET-WIDE: 189 passed, 0 failed
+         switches carrying addresses the render never assigned: 0
+         switches missing a rendered address in the kernel:     0
+         switches unreachable:                                  0
+    adjacencies: 54/54 established; leaf02 unchanged at 56/56
+
+## Final acceptance — BGP MET, EVPN NOT MET
+
+    BGP sessions ESTABLISHED (ipv4 unicast)  1464/1464   MET
+    BGP peer series ESTABLISHED              1464/1464   MET
+    switches unreachable                     0           MET
+    pinned expected-failure signature        unchanged   MET
+      (fabric role failed before completion, run 20260905T065823-467c-64dfe1b;
+       stages with NO artifact: 1)
+
+    EVPN sessions ESTABLISHED                10, expected 16   NOT MET
+    devices with the l2vpn evpn AF up         4, expected  5   NOT MET
+
+    ADMISSION: REFUSE
+
+Admission refuses on `vtep-truth` alone. `kernel-addrs`, `peer-truth`, `applied`
+and `sot` all report ok with only their pinned failures — the D2 repair is
+accepted by the gate.
+
+## Why EVPN is short — a SEPARATE defect, and it predates the repair
+
+`dc1-pod001-fr-leaf01` carries the l2vpn evpn address-family but **zero
+neighbours activated inside it**. Every configured EVPN session in the fabric is
+established (13/13); the fabric is short because leaf01 contributes none.
+
+    leaf01 SERVED frr.conf          leaf01 RUNNING
+      neighbor 10.128.10.189 activate   (absent)
+      neighbor 10.128.10.191 activate   (absent)
+      neighbor 10.128.10.201 activate   (absent)
+      advertise-all-vni                 advertise-all-vni
+
+leaf03 received identical treatment and has all three. And the PRE-repair run
+reported the same `devices with the l2vpn evpn AF up: 4, expected 5`, so this
+was present before any mutation and was not caused by it.
+
+This is D8-class — running FRR diverging from the served frr.conf — not D2. It
+is NOT repaired here: the approved scope was the kernel-address repair, and an
+unexpected measurement stops the work rather than widening it.
+
+## Status
+
+* **D2 remains OPEN.** The agent that re-created the stale bindings is still
+  unidentified; the repair removes the effect, not the cause.
+* **S1 is NOT experiment-admitted.** Admission REFUSE stands until the EVPN
+  shortfall is resolved.
+* leaf01's missing EVPN neighbour activations are a new, separate item, with a
+  known repair shape (the evpn_reconcile/evpn_guard path) that is NOT present on
+  these hosts and would require a sync that is explicitly out of scope.
