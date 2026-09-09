@@ -79,17 +79,66 @@ syncd recreated the interfaces, i.e. something re-added the old addresses and we
 have not identified it". A bgp container restart is correlated with this
 occurrence; correlation is not the trigger.
 
+## Forensics captured 2026-09-09, BEFORE any repair
+
+Archive: `d2-forensics-20260908T235909Z.tgz` (872 KB, 39 files), pulled off the
+box, covering both affected leaves AND the clean control.
+
+**The fault is duplicate (interface, address) BINDINGS, not foreign addresses:**
+
+    leaf01  101 pairs / 55 distinct addrs / 55 named  -> 46 STALE pairs
+    leaf03  100 pairs / 55 distinct addrs / 55 named  -> 45 STALE pairs
+    leaf02   55 pairs / 55 distinct addrs / 55 named  ->  0   (control)
+
+    10.128.0.115  bound on Ethernet36 AND Ethernet28   artifact names Ethernet28
+    10.128.0.153  bound on Ethernet32 AND Ethernet40   artifact names Ethernet32
+
+The same address is bound twice — on the rendered port and on the pre-rebaseline
+port 8 higher. The kernel picks a connected route arbitrarily, so the OPEN can
+leave the wrong physical port.
+
+**The trigger event**, recovered from `syslog.1` (the live syslog no longer
+reaches it): a graceful service-stack restart at **2026-09-06 14:46-14:49** on
+both affected leaves and NOT on the clean one — swss daemons stopped by SIGTERM,
+then swss/syncd/bgp/teamd all started 14:48:57-14:49:01 with `restarts=0`, while
+`database` still dates from the 09-05 deploy. And on the way back up:
+
+    14:49:15.121 ERR  intfmgrd: setIntfIp: '/sbin/ip address add 10.128.10.9/31
+                                dev Ethernet0' failed with rc 2
+    14:49:15.126 INFO intfmgrd: RTNETLINK answers: File exists
+
+intfmgrd found addresses ALREADY BOUND when it came up.
+
+**A hypothesis raised and REFUTED.** If the saved `/etc/sonic/config_db.json`
+held the pre-rebaseline layout, every reload would reintroduce it and the repair
+would not survive the next one. It does not: saved and artifact agree on all
+three leaves (52 INTERFACE pairs each, identical entries). The repair is
+therefore not defeated by a reload replaying a stale saved file.
+
+**Still NOT established** — and this is where the investigation stops — is how
+the pre-rebaseline bindings came to be present at 14:49 on 09-06, given they had
+been removed on 09-05 and the fabric then measured 1464/1464. The reload is
+correlated on both affected leaves and absent on the clean one; the mechanism
+that re-created the old layout is not identified.
+
+## Dry-run of the proposed repair — RUN, NOTHING CHANGED
+
+`DRY_RUN=1 deploy/repair_kernel_addrs.sh dc1-pod001-fr-leaf01 dc1-pod001-fr-leaf03`
+(host copy byte-identical to the committed one, sha256 1a6d41e684ae841c):
+
+    dc1-pod001-fr-leaf01: kernel=98  rendered=52  NOT-IN-ARTIFACT=46
+    dc1-pod001-fr-leaf03: kernel=97  rendered=52  NOT-IN-ARTIFACT=45
+                                              total to delete: 91
+
+Four independent measurements agree on the same set: t88 (46/45), the forensic
+distillation (46/45 stale pairs), the down-adjacency probe (45+46 sessions on
+these leaves, +8 collateral on the spines), and this dry-run.
+
 ## Proposed repair — NOT RUN
 
-1. **Capture forensics FIRST, because the repair destroys them.** The stale
-   addresses are the only surviving evidence of how they got there, and this is
-   a second occurrence of an unexplained mechanism. Before deleting anything:
-   full `ip -4 addr`, `ip route`, CONFIG_DB, and syslog/intfmgrd around the
-   container restart, from both leaves, off the box.
-2. `DRY_RUN=1 deploy/repair_kernel_addrs.sh dc1-pod001-fr-leaf01` and the same
-   for fr-leaf03 — prints what it would remove, changes nothing. Confirm the
-   printed set is exactly the 46 and 45 addresses the artifact does not name.
-3. Apply to those two devices ONLY. Surgical deletion of the addresses the
+1. ~~Capture forensics first~~ — DONE, see above. Archive retained off-box.
+2. ~~Dry-run~~ — DONE, see above. 91 addresses, matching all other measurements.
+3. **Remaining step, NOT run: apply to those two devices ONLY.** Surgical deletion of the addresses the
    artifact does not name — NOT `config reload`, which is what produced the
    state and whose outcome is not understood.
 
