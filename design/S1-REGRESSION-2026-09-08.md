@@ -246,3 +246,169 @@ unexpected measurement stops the work rather than widening it.
 * leaf01's missing EVPN neighbour activations are a new, separate item, with a
   known repair shape (the evpn_reconcile/evpn_guard path) that is NOT present on
   these hosts and would require a sync that is explicitly out of scope.
+
+
+---
+
+# RESOLVED 2026-09-09 — S1 back in its qualified state, ADMIT
+
+Two DISTINCT runtime faults were present on the frontend fabric of pod001. They
+are recorded separately because they are separate, and one of them is still
+unexplained.
+
+    FAULT A (D2)   duplicate kernel bindings          CAUSE UNKNOWN — still open
+    FAULT B (new)  EVPN activation drift              cause not established; repaired
+
+They shared a correlate — see "Correlation, not common cause" below — and that
+is all that is claimed of it.
+
+## Frozen revision and admission
+
+Behavioural pins, declared not inferred, both hosts verified on them:
+
+    platform/deploy      4c3d83ffae3c   (main since moved to 5bb933d827a2)
+    platform/tools       c54158d31a0a   (main since moved to 4d39f4332f9d)
+    platform/clab        7c275234cc9f   (== main)
+    platform/monitoring  a71b34f3caa8   (== main)
+    network/tools        57e790fe3746   (main since moved to cddb5b83e576)
+    network/design       d03056389b6d   (== main)
+    SoT derived from the box: 10.10.0.20
+
+    ADMISSION: ADMIT — 2026-09-09 06:38:59 UTC
+
+## FAULT A — D2, duplicate kernel bindings. CAUSE STILL UNKNOWN.
+
+Affected devices and exact identity sets (approved from the forensic capture,
+re-verified immediately before each mutation):
+
+    dc1-pod001-fr-leaf01   46 (interface,address) pairs   sha256 b2dc0e2ef7d6ccbd
+                           Ethernet100|10.128.4.51 … Ethernet96|10.128.3.225
+                           spanning Ethernet24..Ethernet204
+    dc1-pod001-fr-leaf03   45 (interface,address) pairs   sha256 1e6b87ec60d3fd7a
+                           Ethernet100|10.128.4.11 … Ethernet96|10.128.3.185
+    dc1-pod001-fr-leaf02   0 — NOT affected, NOT touched
+
+The same address bound twice: once on the port the artifact names and once on
+the pre-rebaseline port 8 higher (10.128.0.115 on Ethernet28 AND Ethernet36).
+The kernel selects a connected route arbitrarily, so BGP OPENs could leave the
+wrong physical port.
+
+**The cause is not identified.** The repair removes the effect. This is the
+second occurrence of a mechanism `repair_kernel_addrs.sh` already documented as
+unresolved. **D2 remains OPEN.**
+
+## FAULT B — EVPN activation drift. Separate fault, separate signature.
+
+`dc1-pod001-fr-leaf01` carried the l2vpn evpn address-family with **zero
+neighbour activations inside it**, while its own served frr.conf declared three:
+
+    SERVED frr.conf                     RUNNING (before)
+      neighbor 10.128.10.189 activate     (absent)
+      neighbor 10.128.10.191 activate     (absent)
+      neighbor 10.128.10.201 activate     (absent)
+      advertise-all-vni                   advertise-all-vni
+
+This is NOT D2: no kernel address is involved, and the artifact-vs-running
+divergence is in FRR configuration. It was present BEFORE any repair — the
+pre-repair suite reported the same `devices with the l2vpn evpn AF up: 4,
+expected 5` — so it was not caused by the D2 work. Its cause is likewise not
+established; only its repair is.
+
+`56-evpn-persist.sh --check` did not flag it: that check tests AF PRESENCE, and
+the AF was present. `--reconcile` selects the right condition explicitly —
+"AF PRESENT but 0 peers exchanging prefixes".
+
+## Correlation, not common cause
+
+Both faults were on devices that underwent a graceful service-stack restart at
+**2026-09-06 14:46-14:49** (swss daemons SIGTERMed, then swss/syncd/bgp/teamd
+started 14:48:57-14:49:01, `restarts=0`, `database` untouched from the 09-05
+deploy), and dc1-pod001-fr-leaf02 — which experienced no such restart — carried
+neither fault.
+
+That is a CORRELATION and is recorded as one. It is not a demonstrated common
+cause: the mechanism by which the restart would produce either fault is
+unidentified, leaf03 had fault A without fault B, and no experiment was run to
+establish causation.
+
+## Before / after
+
+    measurement                          before        after
+    BGP sessions ESTABLISHED (ipv4)      1371/1464     1464/1464
+    EVPN sessions ESTABLISHED               6/16          16/16
+    EVPN peer series published             13/16          16/16
+    devices with l2vpn evpn AF up            4/5            5/5
+    switches unreachable                       0              0
+
+    per device (established/total)       before        after
+    dc1-pod001-fr-leaf01                  ~6/51         54/54
+    dc1-pod001-fr-leaf03                   8/54         54/54
+    dc1-pod001-fr-leaf02                  56/56         56/56   (untouched)
+
+    t88 kernel-address truth             6 failed      189 passed, 0 failed
+
+## Exact scoped repair commands
+
+Fault A, one device at a time, each gated before and verified after:
+
+    sudo bash deploy/checks/d2-precondition.sh --device dc1-pod001-fr-leaf01 \
+         --expected-stale /tmp/captured-dc1-pod001-fr-leaf01.txt \
+         --expected-rendered /tmp/rendered-dc1-pod001-fr-leaf01.txt   # 46/46, rc=0
+    sudo bash deploy/repair_kernel_addrs.sh dc1-pod001-fr-leaf01      # removed 46
+
+      → t88 stale 0 / missing 0; 4 sampled neighbours route out their assigned
+        port; 51/51 established, stable over 6 polls — ONLY THEN:
+
+    sudo bash deploy/checks/d2-precondition.sh --device dc1-pod001-fr-leaf03 \
+         --expected-stale /tmp/captured-dc1-pod001-fr-leaf03.txt \
+         --expected-rendered /tmp/rendered-dc1-pod001-fr-leaf03.txt   # 45/45, rc=0
+    sudo bash deploy/repair_kernel_addrs.sh dc1-pod001-fr-leaf03      # removed 45
+
+Fault B:
+
+    sudo bash deploy/56-evpn-persist.sh --check                       # read-only
+    sudo bash deploy/56-evpn-persist.sh --reconcile --device dc1-pod001-fr-leaf01
+      → applied 6 artifact lines under router bgp 4200000036
+      → evpn_est 0→3, xchg 0→3
+
+The precondition gate is idempotent and now REFUSES a repeat: re-run after the
+repair it reports "stale now 0, approved 46" and exits 1.
+
+## What was NOT done
+
+* **No configuration reload.** `config reload` is what produced the D2 state on
+  2026-09-05 and its outcome is not understood.
+* **No service restart.** Fault B was repaired by replaying the device's own
+  artifact through vtysh, which is additive.
+* **No `write memory` / `--save`.** 56-evpn-persist records that as MEASURED
+  HARMFUL; only `--check` and `--reconcile` were used.
+* **No branch sync.** The 57→60-commit distance from main is expected under the
+  freeze and is not an upgrade trigger.
+* **dc1-pod001-fr-leaf02 was never mutated** — verified unchanged at 56/56
+  before, during and after.
+
+## Final suite: 2469 assertions passed, 13 failed, 5 phases
+
+    2 PINNED EXPECTED FAILURES — signature unchanged
+        fabric role failed before completion, run 20260905T065823-467c-64dfe1b
+        stages with NO artifact: 1 found            (surfaces in roles-head too)
+
+   10 EXPECTED UNDER THE FREEZE — main advanced past what the fabric runs
+        platform 60 / network 4 / docs 22 commits behind, both hosts
+        8 files differing, 8 present-in-git-but-absent, both hosts
+
+    1 UNKNOWN / NOT MEASURED — NOT a pass, and NOT counted as one
+        snmp container restarted (StartedAt moved): observed 0 (expected 1)
+        — "measured NOTHING, which is not a pass". It remains unresolved. It is
+        not evidence of health and was not treated as such; the routing result
+        above was measured independently of it.
+
+    0 unexplained failures.
+
+## Freeze resumed
+
+S1 is experiment-admitted again as of 2026-09-09 06:38:59 UTC. The freeze is
+back in force. No further investigation of either fault unless it RECURS or
+BLOCKS a named experiment. D2 stays open in that state deliberately: its effect
+is repaired, its cause is not known, and a third occurrence is the signal that
+would justify reopening.
