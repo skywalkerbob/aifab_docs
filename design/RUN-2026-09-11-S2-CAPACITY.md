@@ -134,11 +134,25 @@ The cost asymmetry is the point: this defect took ~2.5 hours of build plus two
 
 ## 6. Open, recorded not fixed
 
-- **`ztp_wait.sh` serial polling** (§2) — ~20 min per sweep at 106 devices, so
-  its reported counts are stale by up to a full sweep and its timeout can expire
-  after one pass. Needs parallel polling and a single password derivation. Not
-  touched in this run: lifecycle code was explicitly frozen once the host was
-  identified as the binding constraint.
+- ~~`ztp_wait.sh` serial polling~~ — **FIXED and pushed** (`d08f606`, test
+  `c7e14e4`). Sweeps now run concurrently (`GPUFAB_ZTPWAIT_PAR`, default 32):
+  measured 12 probes x 1s in 1s vs 12s serially. The credential is derived once
+  **by measurement** and never assumed, SUCCESS is counted rather than inferred
+  by subtraction, and a sweep that does not account for every target is refused
+  rather than reported. `tests/t98-ztp-wait.sh`, 24 assertions, host-free.
+
+  This was fixed despite the lifecycle-code freeze because it is not a timing
+  tweak chasing the settle hypothesis — it is a check that reported numbers it
+  had not measured, which is the one thing §3 does not permit to stand. It is
+  also needed on any host: even with every device readable, a serial sweep at
+  106 devices costs minutes.
+
+  Two of t98's assertions failed on first run against the new implementation and
+  found two real defects in it: the credential was **assumed** when only one
+  candidate existed, which made an authentication failure indistinguishable from
+  a dead device — the waiter would blame the fabric for its own inability to log
+  in — and the resolution was never reported at all. Both fixed before the
+  commit landed.
 - **2 devices never fetched config_db**: `dc1-pod001-bk-p1-r5-leaf01`
   (172.28.0.48), `dc1-pod001-fr-leaf01` (172.28.0.76). Cause unexamined — on a
   starved host it is not separable from the general failure.
