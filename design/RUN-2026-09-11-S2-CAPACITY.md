@@ -1,0 +1,161 @@
+# S2 baseline on gpufab-s11-fabric — the host is too small. Measured, not inferred.
+
+**Date:** 2026-09-11
+**Host:** `gpufab-s11-fabric` (10.10.0.58), n2-highmem-64 — 64 vCPU, 503 GB
+**Fabric:** s2-1024, 106 SONiC VMs, 3 units (dc1-pod001, dc1-pod002, core)
+**Outcome:** build REFUSED as unsupportable on this host. Deployment preserved,
+not torn down. Frozen S1 untouched throughout (read-only measurement only).
+
+---
+
+## 1. What was asked, and what the measurement did to the hypothesis
+
+The bounded path was: stop the run without teardown; measure for at most 30
+minutes whether CPU reaches a stable quiescent condition and whether re-serving
+then completes ZTP; define a gate from those measurements using consecutive
+CPU-idle samples plus switch readiness; permit exactly one clean rerun; and if
+it saturates again, stop changing lifecycle code and move to a larger host.
+
+The hypothesis under test was *transient synchronization* — that ZTP discovery
+churn was self-sustaining while 106 QEMU VMs booted, and that the 2026-09-08
+success owed to an accidental ~20-minute settle gap.
+
+**The measurement falsified it outright, which is why steps 3 and 4 were not
+executed.** Both presuppose that a settled state exists to gate on. It does not:
+
+- **ZTP had already finished.** 104/106 devices fetched `config_db.json` (the
+  ZTP servers' own logs — the only party that sees every request, and it needs
+  no SSH). `ztp status` reads `Service: Inactive` on every device sampled.
+  There is no discovery churn left to settle.
+- **Re-serving cannot help.** The devices already hold their config. The failure
+  is entirely downstream of ZTP.
+- **The gate could never pass.** 20 consecutive samples, one per minute:
+
+        idle%  = 0    on every sample, distinct value set across the window = {0}
+        healthy = 112  flat
+        config_db = 104/106  flat
+
+  Zero forward progress and zero idle for the entire window. This is a **stable
+  starved state, not a converging one**. A consecutive-CPU-idle gate on this
+  host would wait forever.
+
+Spending the permitted rerun would have bought a second copy of a result 20
+samples already establish, at ~2.5 hours of build.
+
+## 2. `18/106` was a measurement artifact, not ZTP's state
+
+The gate failed reporting `18/106 SUCCESS, 29 pending, 59 unreadable`. That
+number never described the fabric.
+
+`deploy/ztp_wait.sh` polls **serially**, one SSH per device, trying **two**
+passwords at `ConnectTimeout=10` each. An unreadable device therefore costs 20s.
+With 59 unreadable, a single sweep costs ~20 minutes — so within the 1800s
+budget the waiter completes roughly **one pass**, and reports first-pass counts
+as if they were current. The true figure at that moment was 104/106.
+
+This is §3 in the other direction: a check that reported a number it had not
+actually measured. Recorded here; not repaired in this run (see §6).
+
+## 3. The real failure, with the daemon naming its own cause
+
+    host oversubscription
+      -> guest CPU starvation
+      -> swss dead or never started
+      -> no orchagent
+      -> 0 of 39 ports programmed
+      -> every BGP peer stuck in Active
+      -> 0 sessions
+
+Evidence at each link, measured on the boxes:
+
+**Starvation, from FRR's own log** on `dc1-pod001-bk-p1-r1-leaf01`:
+
+    bgpd: [EC 100663315] Thread Starvation: {... timer r=-10.493
+          (bgp_connect_timer)() ...} was scheduled to pop greater than 4s ago
+
+The BGP connect timer fired **10.5 seconds late**. Guest-side idle: 0%.
+
+**swss, sampled across 12 devices:**
+
+    exited x5   created x3   running x1   unreadable x3
+    ports up = 0 on every readable device
+
+`created` is the decisive state — the container was never able to start at all.
+
+**Peer states:** `{'Active': 34}` — all 34, none past Active. With 212 neighbor
+lines configured. Some devices had `BGPCFG=0` (D8's frr.conf stub) as well; that
+is a separate known fault and was never reached, because the gate failed first.
+
+**S1 reference, same machine type, read-only:**
+
+    swss=running  syncd=running  ports up=39   83% idle   load 24   1464/1464 BGP
+
+Same image, same render path, same containerlab version. The only variable is
+density.
+
+## 4. The two calibration points
+
+Both on n2-highmem-64 (64 vCPU, 503 GB):
+
+| | VMs | VM/vCPU | guest RAM | idle | load | swss | ports | BGP |
+|---|---|---|---|---|---|---|---|---|
+| **S1** `gpufab-fabric-01` | 48 | **0.75** | 192 GB (0.38) | 83% | 24 | running | 39/39 | 1464/1464 |
+| **S2** `gpufab-s11-fabric` | 106 | **1.66** | 424 GB (0.84) | **0%** ×20 | 263 | dead | 0 | **0** |
+
+0.75 is proven good. 1.66 is proven fatal. Nothing between them is measured.
+
+**Guest RAM was not the discriminator** — S2 sat at 0.843 of MemTotal, just
+under a 0.85 bound. Had capacity been judged on memory it would have passed.
+CPU density is what separates the two, and it is the only thing that does.
+
+At S1's proven density, 106 VMs need **≥ 142 vCPU**.
+
+## 5. What landed
+
+Both pushed to `skywalkerbob/aifab_platform`, source and tests separately:
+
+- `41fa9b8` `deploy/checks/host-capacity.sh` — read-only precondition. Counts
+  `kind: sonic-vm` from the topology that will actually be deployed (one
+  derivation, the same rule `gen_topology` documents for `switch_count()`),
+  reads the host's real vCPU/MemTotal, refuses above the bound, and states the
+  remedy rather than only refusing. Zero, non-numeric, unreadable or
+  switch-free input is VOID, never a pass. Validated against **both real
+  hosts**: exit 0 / `VERDICT: OK` on S1, exit 1 / `VERDICT: REFUSE` on S2 with
+  `106 VMs needs >= 142 vCPU`.
+- `0318e5b` `tests/t97-host-capacity.sh` — 21 assertions, host-free, registered
+  in `verify.sh` as phase `host-capacity`. Asserts the check *discriminates the
+  two measured points*, not merely that it runs. Test-the-test, both RED: a
+  check whose `rc=1` becomes `rc=0` fails 4 assertions; one that reads an
+  unmeasured count as zero fails 3.
+
+The cost asymmetry is the point: this defect took ~2.5 hours of build plus two
+30-minute timeouts to surface. The check decides it in the time it takes to read
+`/proc/cpuinfo`.
+
+## 6. Open, recorded not fixed
+
+- **`ztp_wait.sh` serial polling** (§2) — ~20 min per sweep at 106 devices, so
+  its reported counts are stale by up to a full sweep and its timeout can expire
+  after one pass. Needs parallel polling and a single password derivation. Not
+  touched in this run: lifecycle code was explicitly frozen once the host was
+  identified as the binding constraint.
+- **2 devices never fetched config_db**: `dc1-pod001-bk-p1-r5-leaf01`
+  (172.28.0.48), `dc1-pod001-fr-leaf01` (172.28.0.76). Cause unexamined — on a
+  starved host it is not separable from the general failure.
+- **D8** still present on some devices (`BGPCFG=0`). The reconciler that repairs
+  it never ran, because `ztp_wait` gated first.
+- **D2** remains open from the S1 regression; unrelated to this run.
+
+## 7. State left behind
+
+`gpufab-s11-fabric` is **RUNNING with the deployment preserved** — 267
+containers, 112 healthy, 3 ZTP servers up, NetBox local at
+`http://10.10.0.58:8000` (258 devices / 3332 cables). Nothing was torn down.
+`gpufab-s11-ops` remains TERMINATED with its disk preserved (`autoDelete=False`).
+
+**Frozen S1 was never mutated.** Every S1 interaction in this run was a
+read-only measurement (`nproc`, `/proc/meminfo`, `docker inspect`,
+`show interfaces status`).
+
+The next decision — resize or re-scope — is a spend decision and is the
+operator's. It is stated with costs in the session; nothing here presumes it.
