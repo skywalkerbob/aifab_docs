@@ -225,3 +225,26 @@ someone remembers to run — the 2026-09-11 build had every ingredient of the
 check available and simply never asked. On the rebuild it counted 48+48+10 = 106
 `sonic-vm` nodes from the generated topologies and passed at 0.828 before
 anything booted.
+
+### 8a. Two things the rebuild itself found
+
+**The ZTP servers are outside the ownership engine.** `ztp_serve_units.sh`
+creates `c12-ztp-<unit>` as plain docker containers, so they carry no
+containerlab label and no ledger entry. After the host reboot they RESTARTED on
+their own, held the three `c12-oob-*` networks open, and `c12 --recover` then
+failed with `network:c12-oob-core is PRESENT after cleanup — expected ABSENT`:
+the engine had correctly adopted and released everything it owned, and could not
+account for the thing it does not. Removing the three containers by hand let
+recovery complete cleanly (`adopted 3 ledger entry(ies)`, `VERDICT: OK`).
+
+Open, not fixed: the servers c12 creates should be ledger resources like its
+labs, networks and bridges, or a reboot will block the next build every time.
+
+**Do not destroy outside the ownership engine.** The first rebuild attempt
+destroyed the stale labs with `containerlab destroy` directly, and c12 then
+refused in five seconds with eight `ledger holds X but nothing was acquired or
+adopted for it` failures — the engine working exactly as designed. `--recover`
+is the documented drain and existed for precisely this; reaching past it turned
+a one-command recovery into a debugging detour. The fix was to use the committed
+path, not to force past it.
+
