@@ -173,3 +173,55 @@ read-only measurement (`nproc`, `/proc/meminfo`, `docker inspect`,
 
 The next decision — resize or re-scope — is a spend decision and is the
 operator's. It is stated with costs in the session; nothing here presumes it.
+
+---
+
+## 8. The resize (2026-09-12) — and two things it found
+
+Authorized: n2-highmem-128, rerun with the gate. What actually happened:
+
+**Three stockouts.** `n2-highmem-128`, `n2-standard-128` and `c3-standard-176`
+are all unavailable in us-central1-a. This is the single-zone stockout risk that
+has been on the open list; it is now a realised cost, not a hypothetical.
+
+**n2d-standard-128 started and was REJECTED.** 128 vCPU, 504 GB, docker up,
+disk intact, load 0.12, 100% idle — and `/dev/kvm` **absent**, no SVM flag. GCP's
+nested virtualisation here is Intel-VMX only, so on AMD the SONiC guests would
+have fallen back to TCG emulation. The host looked perfect and could not run a
+single switch. Caught by an explicit `/dev/kvm` check BEFORE building; had the
+rebuild simply been launched, 106 VMs would have crawled under emulation and the
+symptom would have looked like something else entirely. The acceptance test for
+a candidate host is therefore `/dev/kvm` on the booted machine — never the
+support matrix, never the machine type's name.
+
+**Accepted: `m3-megamem-128`** — 128 vCPU, 1921 GB, Intel Xeon, `kvm_intel`
+loaded, VMX present. Density 106/128 = **0.828**, RAM 424/1921 = 0.22. More
+expensive than the n2 plan (memory-optimised), and chosen because it is what has
+capacity and passes the only test that matters.
+
+**The host was never hardened.** `--assert` REFUSED on first contact:
+networkd-dispatcher unmasked (D7) and the systemd-networkd unmanaged drop-in
+missing (D9). `gpufab-s11-fabric` was built outside `a4-host.sh`, and the
+hardening existed ONLY inside that script's VM-creation startup script — so it
+had neither, while running an S2 build with systemd-networkd managing all 405 of
+its containerlab veths and bridges. That is the configuration that on 2026-09-07
+took a host's own networking down mid-build and left sshd dead while the
+instance stayed RUNNING. It did not fire this time; that is luck, not safety.
+
+Fixed at the root: `deploy/host_harden.sh` is now the single definition of D7+D9,
+and `a4-host.sh` EMBEDS it rather than restating it (`19cb260`, test `f480ba6`,
+20 assertions). Its `--d7`/`--d9` steps initially returned 0 while `systemctl
+mask` failed silently behind `|| true` — a step that did not happen reporting
+success, on the path that decides whether a host is safe to build on. They now
+fail unless systemd confirms the state changed.
+
+**Disk survived the machine-type change intact**: all four plan/profile
+checksums identical to pre-stop, 106 config_db artifacts present, NetBox back at
+**258 devices / 3332 cables** — the pre-resize numbers. Postgres was stopped
+explicitly before power-down rather than trusted to the ACPI path.
+
+**The gate is now IN the build path** (`c2f173d`, test `e06e1cf`), not a wrapper
+someone remembers to run — the 2026-09-11 build had every ingredient of the
+check available and simply never asked. On the rebuild it counted 48+48+10 = 106
+`sonic-vm` nodes from the generated topologies and passed at 0.828 before
+anything booted.
