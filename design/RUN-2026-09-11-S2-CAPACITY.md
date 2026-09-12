@@ -248,3 +248,43 @@ is the documented drain and existed for precisely this; reaching past it turned
 a one-command recovery into a debugging detour. The fix was to use the committed
 path, not to force past it.
 
+## 9. Result — S2 is up on the resized host
+
+`c12 VERDICT: OK`, `RUN COMPLETE rc=0`, **post-provision gate PASS on all three
+units**. Wall clock **~19.5 minutes** (04:51:39 -> 05:11:07 UTC), against the
+2.5 hours the previous attempt spent failing.
+
+The capacity gate ran inside c12, counted 48+48+10 = 106 `sonic-vm` nodes from
+the generated topologies, and passed at **0.828 VM/vCPU** before anything booted.
+
+**ZTP: 106/106 SUCCESS, 0 failed, 0 unreadable.** Sweep times **11s, then 2s, 1s**
+— the concurrent waiter doing what it was built for; the same sweep cost ~20
+minutes before the fix, which is why the old run reported `18/106` about a fabric
+that was at 104/106.
+
+**EVPN reconcile: 0 failed** across all three units. **t92: 15/15 on dc1-pod001,
+15/15 on dc1-pod002**, core correctly NOT APPLICABLE — including on-box EVPN
+tables equal to their rendered artifacts, every configured peering established,
+remote-VTEP counts matching each EVPN domain, tenant dataplane forwarding, and
+the negative control firing.
+
+Measured across all 106 devices afterwards, in parallel, 0 unreadable:
+
+| | before (64 vCPU) | after (128 vCPU) |
+|---|---|---|
+| swss running | 1 of 12 sampled | **106 / 106** |
+| Ethernet ports oper-up | 0 | **3882** |
+| BGP sessions Established | 0 | **1144** |
+| EVPN sessions Established | 0 | **32** |
+| devices unreadable | 3 of 12 | **0** |
+| load / idle | 263 / 0% | **24.5 / 83%** |
+
+The host now sits at **load 24.5, 83% idle** — the same profile as healthy S1
+(load 24, 83% idle). Same fabric, same code, same images; only the vCPU count
+changed. That is the diagnosis confirmed from the other side.
+
+Note on the totals: 1144 BGP and 32 EVPN are MEASURED counts, not model-derived
+expectations. The model-derived acceptance is t92, which passed per unit against
+`fabric_model`; these two numbers are recorded as observations and should not be
+treated as a target until `expected.py` derives them.
+
