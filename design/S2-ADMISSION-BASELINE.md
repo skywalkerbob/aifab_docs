@@ -23,7 +23,7 @@ on 2026-09-13 at admission.
 
 | leg | measured | compared against |
 |---|---|---|
-| frozen trees | 6/6 match on `gpufab-s11-fabric` | declared constants at platform `e06e1cf` |
+| frozen trees | 6/6 match on `gpufab-s11-fabric` | declared constants at platform `20903f7` |
 | profile | `69d1784928b2…` | declared `S2_PROFILE_SHA256` |
 | NetBox devices | 258 | `expected.py devices_total` |
 | NetBox cables | 3332 | `expected.py cables` |
@@ -32,7 +32,7 @@ on 2026-09-13 at admission.
 | EVPN speakers with l2vpn AF | **10/10** | D8 postcondition |
 | switches unreadable | 0 | — (nonzero refuses) |
 | underlay CONFIGURED | **3728** | `expected.py bgp_peer_series` |
-| underlay ESTABLISHED | **1112** | `bgp_switch_switch_sessions` × 2 |
+| underlay ESTABLISHED | **3728** | `expected.py bgp_peer_series` (all of it) |
 | EVPN CONFIGURED | **32** | `evpn_bgp_sessions` × 2 |
 | EVPN ESTABLISHED | **32** | == configured |
 | VTEPs with a VNI | **6** | `expected.py evpn_vteps` |
@@ -47,35 +47,54 @@ profile the fabric was actually built from.
 ENDPOINT counts, and a switch-to-switch session is seen by both ends. The factor
 of two is written into the gate rather than buried in a constant.
 
-## 2. The declared deficiency — switch-to-host BGP
+## 2. FIXED 2026-09-14 — switch-to-host BGP (was a declared deficiency)
 
-**2616 of 3728 underlay sessions are configured on the switch and dead on the
-host side.** Pinned by identity; the gate prints it every run and REFUSES if the
-number moves in either direction.
+**This was wrong to record as a waiver, and the verdict was wrong to be ADMIT.**
+A gate cannot admit "S2" while 2616 sessions the model derives are knowingly
+absent: pinning a deficiency records what is broken, it does not make the fabric
+admissible. `admit-s2` now requires every derived session Established, and it was
+proven NOT-ADMIT against the unfixed fabric first —
+`REFUSE underlay 1112/3728 — 2616 absent`.
 
-Cause, traced to source:
+**The cause, traced to source.** `c12 --ztp` skipped the push configurer —
+correct for SWITCHES, since a switch with a startup config never runs ZTP — and
+that skip also dropped the HOST nodes, which nothing else configures:
+`unit_configure.py:187` routes every node that is not `kind: sonic-vm` to
+`interim_deploy.deploy_host`, and `gen_topology.py:517` launches host nodes with
+`cmd: "sleep infinity"` commented *"daemons are started by the deploy tooling"*.
+So FRR never started in one gpu/cpu/storage container.
 
-- `c12 --ztp` prints *"switches will self-provision; NOT running the push
-  configurer"* and never passes `--configure`.
-- `tools/unit_configure.py:187` routes every node that is **not** `kind:
-  sonic-vm` to `deploy_host` — so the push configurer is the **only** thing that
-  starts daemons on host nodes.
-- `clab/gen_topology.py:517` emits host nodes with `cmd: "sleep infinity"`,
-  commented *"daemons are started by the deploy tooling"*, which overrides the
-  `gpufab-host:1.0` image's own `Cmd` of `/usr/lib/frr/docker-start`.
+**The fix restores that delegated path and nothing else** (`d1883d8`, test
+`20903f7`):
 
-So in ZTP mode FRR never starts in the gpu/cpu/storage containers. Confirmed on
-the boxes: `neighbor 10.128.0.0 … description dc1-pod001-gpu0001` sits in
-`Active`, and those containers have no `bgpd` and no `frr.conf`.
+- `unit_executor` records each unit's `sonic-vm` set from the **topology's own
+  `kind`** — the field containerlab dispatches on and gen_topology wrote — so
+  "is this a switch" has one derivation and cannot drift from a name.
+- `configure_targets(hosts_only=True)` subtracts that set from R's `configured`.
+  The set is R's **minus** switches, so a host R does not name is still never
+  touched.
+- Selecting 0 devices REFUSES (rc=2) and never calls the configurer.
+- `sonic_push_refusal` states the same rule **independently at the push**, so the
+  two derivations disagreeing is a refusal rather than a silent second writer on
+  a box ZTP is already provisioning.
+- A host that fails, is unreadable, or raises **fails the run** (rc=1).
+- `t100`, 16 assertions, host-free (driver and push both faked). RED control:
+  removing the subtraction fails 5 assertions and the switches leak into the set.
 
-**S2 has never had a run where both layers were correct.** The 2026-09-06 push
-run reached 3728/3728 underlay (t92's own header records it) but reported EVPN
-`0/0` — that was D6. The ZTP path fixed the overlay and lost the host underlay.
-Neither path has produced a complete fabric.
+**Applied in place, no rebuild** (`tools/configure_hosts.py`, which adds no logic
+— same `configure_targets`, same `interim_push` — and touches no ownership
+ledger, because configuring a host daemon is not a resource lifecycle
+operation). 148 host devices: 258 total − 106 switches − the 4 R lists as
+unconfigured. `configured 148 device(s)`, rc=0, ~11 minutes.
 
-**This is recorded, not tolerated.** Until it is fixed, S2 experiments must not
-depend on switch-to-host BGP. Remove the pin when host nodes are configured — do
-not widen it.
+**Result, measured on all 106 switches:** underlay **3728/3728 Established**,
+**0 switches with any session down**, EVPN 32/32, hosts peering
+(`gpu0001` 20/20, `cpu0001` 3/3).
+
+**The pin was re-taken at `20903f7`** (`0232216`) because the fabric's behaviour
+legitimately changed: `deploy/` and `tools/` moved, `clab/` and `monitoring/` did
+not — which is what a behavioural freeze is supposed to show. Re-pinning is how
+the old baseline is retired; widening a tolerance is not.
 
 ## 3. What this found about the 2026-09-12 report
 
