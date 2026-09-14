@@ -96,6 +96,23 @@ legitimately changed: `deploy/` and `tools/` moved, `clab/` and `monitoring/` di
 not — which is what a behavioural freeze is supposed to show. Re-pinning is how
 the old baseline is retired; widening a tolerance is not.
 
+## 2a. What is proven, and what is not — do NOT rebuild to close the gap
+
+**Proven on the real fabric:** the host-only configuration step, applied in place
+to the running S2 (148 devices, rc=0), producing 3728/3728 Established with 0
+switches down. That is the named objective and it is met.
+
+**Proven host-free only:** `c12 --ztp` invoking that step as part of a FRESH
+build. `t100` fakes the driver and the push, so it proves the scoping and the
+failure propagation but not the orchestration end to end on a real fabric.
+
+**Rebuilding S2 to close that gap is NOT authorized and is not warranted**
+(Bob, 2026-09-14): the current fabric meets the objective and is
+experiment-admitted. The evidence will arrive for free the next time a fabric is
+genuinely built — a rebuild whose only purpose is to watch the new code path run
+spends a real fabric to observe something no experiment needs. Record the gap;
+do not spend the fabric on it.
+
 ## 3. What this found about the 2026-09-12 report
 
 That run was reported as "S2 is up" on the strength of 1144 established sessions
