@@ -15,7 +15,7 @@ second point on S1 and that is not part of this run.
 
 ## 2. Result
 
-Two independent runs of the same deterministically-chosen link
+Three independent trials of the same deterministically-chosen link
 (`dc1-ba-core001 Ethernet0 → dc1-pod001-bk-p1-spine01`, peer `10.128.10.216`):
 
 | observable | trial 1 | trial 2 | trial 3 |
@@ -92,10 +92,13 @@ detection time and been believed.
 ## 5. Safety, as executed
 
 One interface, one switch, restored by an EXIT trap on every path. `config save`
-was never run, so the fault could not survive a reload. Verified after both runs:
+was never run, so the fault could not survive a reload. Verified after every trial:
 interface up, peer Established, fabric at 3728/3728 with 0 unreadable, no probe
 process left behind.
 
-`admit-s2` was deliberately **not** re-run afterwards: its S1 leg reads the other
-fabric, and S1 was out of scope. The experiment's own post-gate — the S2 probe
-against `expected.py` — is what confirms the fabric was left as it was found.
+`admit-s2` was re-run after the trials and returned **ADMIT**, with its S1 leg
+reporting **S1 ADMISSION: ADMIT**. An earlier version of this file said the gate
+had been skipped to avoid touching S1; that was over-restriction on my part —
+the S1 leg is read-only by `admit-experiment.sh`'s own contract, and a read was
+always permitted. The experiment's own post-gate (the S2 probe against
+`expected.py`) additionally confirms the fabric was left as it was found.
