@@ -18,24 +18,40 @@ second point on S1 and that is not part of this run.
 Two independent runs of the same deterministically-chosen link
 (`dc1-ba-core001 Ethernet0 → dc1-pod001-bk-p1-spine01`, peer `10.128.10.216`):
 
-| observable | run 1 | run 2 |
-|---|---|---|
-| near-end peer left Established | *invalid — see §4* | **0.54 s** |
-| fabric settled at 3726 | 43.26 s | **42.92 s** |
-| full recovery after restore | 9.04 s | **9.17 s** |
-| fabric after | 3728/3728, 0 unreadable | 3728/3728, 0 unreadable |
+| observable | trial 1 | trial 2 | trial 3 |
+|---|---|---|---|
+| near-end peer left Established | *invalid — see §4* | **0.54 s** | **0.69 s** |
+| fabric settled at 3726 | 43.26 s | **42.92 s** | **36.51 s** |
+| full recovery after restore | 9.04 s | **9.17 s** | **8.82 s** |
+| fabric after | 3728/3728, 0 unreadable | 3728/3728, 0 unreadable | 3728/3728, 0 unreadable |
 
-Sweep resolution: **1.82 s**, so the settle figures are not an artefact of coarse
+Sweep resolution: 1.7-1.8 s, so the settle figures are not an artefact of coarse
 polling.
+
+**Settle spread is 36.5-43.3 s (mean ~40.9).** Recovery is tight (8.8-9.2 s) and
+near-end detection is tight (0.54-0.69 s); the settle figure is the variable one.
 
 ## 3. What it says
 
-**The failure direction is timer-bound, not size-bound.** The near end notices in
-**0.54 s** — that is a link-down event, not a protocol timeout. The fabric does
-not settle for another ~42 s, which is the far end ageing out its session on the
-hold timer (the leaves carry `timers 10 30`). The ~42 s is therefore a property
-of the timer configuration, not of having 106 switches, and would not be expected
-to grow with fabric size.
+**Settling is CONSISTENT WITH timer domination. It does not establish it.** An
+earlier version of this file said "timer-bound, not size-bound" and that was an
+overclaim on two counts, both corrected here:
+
+- **One fabric size cannot establish size-independence.** There is a single
+  point, 106 switches. Nothing here separates a timer effect from a size effect;
+  it is only that a timer effect is sufficient to explain the magnitude.
+- **The measured settle EXCEEDS the configured hold.** The negotiated hold is
+  30 s (confirmed on both boxes: `bgpTimerHoldTimeMsecs` 30000, keepalive 10000),
+  and settling took 36.5-43.3 s. There is a **residual of 6.5-13.3 s above the
+  hold, and it is variable** — which a pure hold-timer explanation does not
+  account for. Calling the whole ~42 s "the hold timer" hid that residual.
+
+What the numbers do support: the near end notices in **0.54-0.69 s**, which is a
+link-down event rather than a protocol timeout, while the fabric as a whole takes
+tens of seconds. Whether the bulk of that is the far end ageing out on the hold
+timer is exactly what E-CONV-02 tests, by moving the negotiated hold and seeing
+whether settling moves with it. Any fixed residual then becomes separately
+visible.
 
 **Recovery is event-driven and an order of magnitude faster**: 9.1 s from
 interface-up to the full derived total, because session establishment is
@@ -47,9 +63,9 @@ number will be wrong by 4-5x in the direction that matters.
 
 **What this does NOT establish.** One link, one topology position (core↔pod
 spine), one fabric size, one timer configuration. It is a pilot: it shows the
-method produces a stable, reproducible number, and it gives the S2 point. Whether
-42 s is size-invariant is a hypothesis this run is consistent with and does not
-prove — that needs the S1 point, or a timer sweep on S2.
+method produces a reproducible recovery number and a settle number with real
+spread, and it gives the S2 point. Size-independence needs a second fabric size
+and is NOT authorized; timer domination is tested by E-CONV-02 on S2.
 
 ## 4. Two measurement defects, both caught by the experiment's own controls
 
