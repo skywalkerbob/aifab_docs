@@ -1,5 +1,12 @@
 # E-CONV-01 — reconvergence after a single link failure (S2 pilot)
 
+> **STATUS: CLOSED 2026-09-17.** Superseded by E-CONV-02 (timer sweep),
+> E-CONV-03 (common link) and E-CONV-SIZE-COMPARISON (S1 vs S2). Its question is
+> answered and its numbers are retained only as the method's first, coarsest
+> point — it polled at 5 s where the later runs poll at 3 s, and its first trial
+> carried the two-clock defect. **Do not cite its figures**; cite
+> E-CONV-SIZE-COMPARISON. Nothing here is pending.
+
 **Date:** 2026-09-15
 **Fabric:** S2 on `gpufab-s11-fabric` — 106 switches, 3728 derived underlay sessions
 **Scope:** S2 pilot only. **S1 was not touched**, on instruction.
