@@ -195,6 +195,19 @@ in conflict. The split of authority:
    The run is complete only at full convergence to *that* manifest; quarantine
    requires explicit, recorded acceptance.
 3. **A PROVEN containerlab unit lifecycle** — the hardest gap, **unsolved today**.
+   **TESTED 2026-09-17, substrate-1 NOT DEMONSTRATED** — see
+   `E-LIFECYCLE-01-UNIT-REBUILD.md`. Separate-labs-per-unit SCOPES correctly (4
+   exclusive resources released, 404 left owned, the other two units
+   byte-identical throughout), but `--release-unit` cannot COMPLETE a teardown:
+   the lab's identity is its container-ID set, `containerlab destroy` shrinks
+   that set as it runs, and the engine then refuses mid-delete because the object
+   "is not the object we created". The teardown invalidates the identity that
+   authorises it. Needs a durable CONFIRMED -> DELETING -> ABSENT transition
+   (authorize against the original identity immediately before deleting, judge
+   the postcondition as ABSENCE, allow a strict subset as owned partial deletion,
+   refuse any foreign id, hold the host lock across authorization and mutation).
+   Still blocking; do not build on substrate-1 until that is implemented and
+   fault-tested.
    Stage 40 destroys the whole lab (`40-topology.sh:61`) then one full deploy
    because clab refuses a second filtered deploy (`:153`, the bug that motivated
    this). The new driver **cannot** deploy pod 2 after pod 1 with that mechanism.
