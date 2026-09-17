@@ -206,8 +206,20 @@ in conflict. The split of authority:
    (authorize against the original identity immediately before deleting, judge
    the postcondition as ABSENCE, allow a strict subset as owned partial deletion,
    refuse any foreign id, hold the host lock across authorization and mutation).
-   Still blocking; do not build on substrate-1 until that is implemented and
-   fault-tested.
+   **TRANSITION IMPLEMENTED AND FAULT-TESTED 2026-09-17** (`eddc5b4`, test
+   `3dc21d6`): authorize immediately before mutating against the original
+   identity; DELETING recorded durably BEFORE the delete; postcondition judged as
+   ABSENCE; a strict subset of the original members accepted as an owned partial
+   deletion ONLY when DELETING was recorded; any foreign member refuses; the host
+   lock enforced across authorization and mutation rather than documented.
+   `t101` is 42 assertions host-free with five RED controls, including a delete
+   that dies INSIDE the call and a new process that must resume it.
+
+   **Substrate-1 is still NOT DEMONSTRATED.** The blocker to re-attempting is
+   removed; the demonstration itself is not done. It needs E-LIFECYCLE-01 re-run
+   against a real fabric — with the engine deployed to the host, which is a
+   destructive per-unit rebuild and needs its own authorization. Implementing the
+   fix is not the same as showing the lifecycle works.
    Stage 40 destroys the whole lab (`40-topology.sh:61`) then one full deploy
    because clab refuses a second filtered deploy (`:153`, the bug that motivated
    this). The new driver **cannot** deploy pod 2 after pod 1 with that mechanism.

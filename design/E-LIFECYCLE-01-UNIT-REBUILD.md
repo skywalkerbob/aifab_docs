@@ -81,8 +81,29 @@ race. The deletion protocol needs an explicit durable transition:
 - **hold the host lock across authorization AND mutation**, so nothing can
   replace the object in between.
 
-Until that is implemented *and fault-tested*, §9.3 substrate-1 stays NOT
-DEMONSTRATED and the incremental bring-up architecture stays blocked on it.
+**IMPLEMENTED AND FAULT-TESTED 2026-09-17** — `tools/ownership.py` (`eddc5b4`),
+`tests/t101-delete-transition.sh` (`3dc21d6`), 42 assertions host-free.
+
+All four requirements are in the engine: authorization immediately before the
+mutation against the original identity; `DELETING` recorded durably *before*
+`res.delete()` (that ordering is what makes a crash mid-call recoverable, and is
+its own RED control); the postcondition judged as **absence**; the strict-subset
+rule for owned partial deletion, gated on DELETING having been recorded, with any
+foreign member refusing outright. The host lock is now *enforced* across
+authorization and mutation — `release_all` refuses without it — rather than left
+to convention. Set-valued identities are declared (`SET_IDENTITY_KINDS`), not
+inferred from punctuation.
+
+Five RED controls fire: equality-only (7 assertions fail), DELETING not replayed
+(5), foreign member allowed (5), lock not required (3), DELETING marked after the
+delete (3). The last needed a fake that dies *inside* `delete()` — with a fake
+that merely returned early the marker was written either way, so the ordering
+looked untested when it was in fact unprobed.
+
+**Substrate-1 remains NOT DEMONSTRATED.** The fix removes the blocker to trying
+again; it does not itself show the lifecycle works. That needs E-LIFECYCLE-01
+re-run against a real fabric with the engine deployed — a destructive per-unit
+rebuild, requiring its own authorization.
 
 ## 6. Also found
 
