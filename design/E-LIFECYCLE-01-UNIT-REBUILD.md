@@ -100,10 +100,48 @@ delete (3). The last needed a fake that dies *inside* `delete()` — with a fake
 that merely returned early the marker was written either way, so the ordering
 looked untested when it was in fact unprobed.
 
-**Substrate-1 remains NOT DEMONSTRATED.** The fix removes the blocker to trying
-again; it does not itself show the lifecycle works. That needs E-LIFECYCLE-01
-re-run against a real fabric with the engine deployed — a destructive per-unit
-rebuild, requiring its own authorization.
+### Re-run with the engine deployed — 2026-09-20
+
+**The transition works on a real fabric. The lab deletion no longer refuses.**
+Where the 17 September run died on `identity was '<124 ids>' and is now
+'<3 ids>'`, the engine now logs `resuming a deletion: identity unchanged` and
+deletes the lab cleanly. That failure mode is gone.
+
+Three runs, three *different* failures, each further along:
+
+| run | failed at | cause |
+|---|---|---|
+| 17 Sep, no engine | lab delete | the teardown invalidated its own authority — **fixed** |
+| 20 Sep #1, engine deployed | `cleanup raised TypeError` | **my** one-argument `self.log` call in the fix |
+| 20 Sep #2, arity fixed | `network ... PRESENT after cleanup` | the ZTP server, outside the ledger, holds it |
+
+**The arity bug is the one worth dwelling on.** The transition's new "resuming a
+deletion" line called `self.log` with one argument where it takes
+`(level, message)`. So the fix's own logging broke the release it had just made
+possible. **t101 could not see it**: the fake was `lambda *_: None`, which
+accepts any arity — more permissive than the real logger, and therefore unable
+to catch a contract violation. The host-free suite was green and the deployed
+engine passed t101 42/42 *on the host* before this appeared. Only a real
+release found it. Fixed in `2a28426`, with a strict fake at the production
+signature, an assertion that every logged call had two parts, an assertion that
+the resume line actually ran, and a RED control.
+
+**Substrate-1 is still NOT DEMONSTRATED — but the blocker has moved off the
+engine.** What now fails is `network:c12-oob-dc1-pod002 is PRESENT after
+cleanup`, because `c12-ztp-dc1-pod002` holds it and has no ledger entry (§4).
+That gap has now blocked three separate operations: `--recover` (12 Sep),
+recovery from a failed teardown (17 Sep), and the teardown itself (20 Sep).
+
+**The next fix is bounded and specific:** make the unit's ZTP server a ledger
+resource, or have the unit release tear it down as part of the unit. Nothing
+else stands between this substrate and a demonstration.
+
+**State after, restored and re-admitted twice:** pod002 rebuilt, ZTP 48/48, gate
+PASS scoped to `dc1-pod002`, both untouched units verified unchanged by the
+gate's fingerprint *and* by an independent container-identity guard, fabric
+**3728/3728** and **32/32 EVPN** with 0 unreadable, **`admit-s2: ADMIT`** with
+**`S1 ADMISSION: ADMIT`**. The S2 pin was re-taken at `2a28426` because the
+engine the fabric runs changed — only `platform/tools` moved.
 
 ## 6. Also found
 

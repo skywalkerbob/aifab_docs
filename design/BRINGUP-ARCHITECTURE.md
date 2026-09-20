@@ -215,11 +215,17 @@ in conflict. The split of authority:
    `t101` is 42 assertions host-free with five RED controls, including a delete
    that dies INSIDE the call and a new process that must resume it.
 
-   **Substrate-1 is still NOT DEMONSTRATED.** The blocker to re-attempting is
-   removed; the demonstration itself is not done. It needs E-LIFECYCLE-01 re-run
-   against a real fabric — with the engine deployed to the host, which is a
-   destructive per-unit rebuild and needs its own authorization. Implementing the
-   fix is not the same as showing the lifecycle works.
+   **RE-RUN 2026-09-20 WITH THE ENGINE DEPLOYED: the transition works; the lab
+   deletion no longer refuses.** Substrate-1 is **still NOT DEMONSTRATED**, but
+   the blocker has MOVED OFF THE ENGINE. What now fails is
+   `network:c12-oob-dc1-pod002 is PRESENT after cleanup` — `c12-ztp-<unit>` is a
+   plain docker container with no ledger entry, holding the unit's oob network
+   open. That single gap has now blocked `--recover` (12 Sep), recovery from a
+   failed teardown (17 Sep), and the teardown itself (20 Sep).
+
+   **Next fix, bounded:** make the unit's ZTP server a ledger resource, or have
+   the unit release tear it down as part of the unit. Nothing else stands between
+   this substrate and a demonstration.
    Stage 40 destroys the whole lab (`40-topology.sh:61`) then one full deploy
    because clab refuses a second filtered deploy (`:153`, the bug that motivated
    this). The new driver **cannot** deploy pod 2 after pod 1 with that mechanism.
