@@ -1,4 +1,10 @@
-# E-LIFECYCLE-01 — §9.3 substrate-1: NOT DEMONSTRATED
+# E-LIFECYCLE-01 — §9.3 substrate-1: DEMONSTRATED
+
+> **STATUS: CLOSED 2026-09-20.** The per-unit release/deploy cycle completed
+> with **no manual intervention**, and `admit-s2` returned **ADMIT** with
+> **S1 ADMIT**. Separate-labs-per-unit is the unit-lifecycle substrate. The
+> sections below are the record of how it got there — three failures, each a
+> different defect, each fixed. Nothing here is pending.
 
 **Date:** 2026-09-17
 **Fabric:** S2 on `gpufab-s11-fabric`, unit `dc1-pod002` only. S1 not touched.
@@ -13,8 +19,29 @@ hardest gap, unsolved today**, and gates everything behind it: *"No build until
 one is demonstrated."* Three substrates were offered; this tested the first,
 separate-labs-per-unit.
 
-**Verdict: NOT DEMONSTRATED.** Record it as such until the state transition in §5
-is implemented and fault-tested.
+**Verdict: DEMONSTRATED, 2026-09-20**, after three distinct defects were fixed —
+the deletion transition (§5), a log-arity bug in that fix, and the serving
+layer's missing destroy (§4). The clean cycle:
+
+    stopped ZTP server c12-ztp-dc1-pod002
+    releasing c12-dc1-pod002 only: 10 resource(s) adopted, 404 left owned
+    lab:c12-dc1-pod002 resuming a deletion: owned partial deletion:
+        6 of 124 member(s) remain and all are ours, with DELETING already recorded
+    release rc=0        deploy rc=0        RUN COMPLETE rc=0
+
+| unit | devices | gone at mid | containers same | configs same | sessions |
+|---|---|---|---|---|---|
+| **dc1-pod002** (rebuilt) | 48 | **48** | **0** | 40 | 1664 → 1664 |
+| dc1-pod001 (untouched) | 48 | 0 | **48** | **48** | 1664 → 1664 |
+| core (untouched) | 10 | 0 | **10** | **10** | 400 → 400 |
+
+Container identity proves both halves with one measurement: the rebuilt unit
+kept **none** of its container ids, the untouched units kept **all** of theirs —
+at mid-teardown *and* after. Fabric back to **3728/3728**, 0 unreadable,
+**`admit-s2: ADMIT`** with **`S1 ADMISSION: ADMIT`**.
+
+**No hand touched it.** That is the whole criterion: every previous attempt
+needed a `docker rm` of the unit's ZTP server.
 
 ## 2. Two distinct blockers
 

@@ -194,45 +194,25 @@ in conflict. The split of authority:
    preempt, or converge R then R+1 — so a reconcile never chases a moving target.
    The run is complete only at full convergence to *that* manifest; quarantine
    requires explicit, recorded acceptance.
-3. **A PROVEN containerlab unit lifecycle** — the hardest gap, **unsolved today**.
-   **TESTED 2026-09-17, substrate-1 NOT DEMONSTRATED** — see
-   `E-LIFECYCLE-01-UNIT-REBUILD.md`. Separate-labs-per-unit SCOPES correctly (4
-   exclusive resources released, 404 left owned, the other two units
-   byte-identical throughout), but `--release-unit` cannot COMPLETE a teardown:
-   the lab's identity is its container-ID set, `containerlab destroy` shrinks
-   that set as it runs, and the engine then refuses mid-delete because the object
-   "is not the object we created". The teardown invalidates the identity that
-   authorises it. Needs a durable CONFIRMED -> DELETING -> ABSENT transition
-   (authorize against the original identity immediately before deleting, judge
-   the postcondition as ABSENCE, allow a strict subset as owned partial deletion,
-   refuse any foreign id, hold the host lock across authorization and mutation).
-   **TRANSITION IMPLEMENTED AND FAULT-TESTED 2026-09-17** (`eddc5b4`, test
-   `3dc21d6`): authorize immediately before mutating against the original
-   identity; DELETING recorded durably BEFORE the delete; postcondition judged as
-   ABSENCE; a strict subset of the original members accepted as an owned partial
-   deletion ONLY when DELETING was recorded; any foreign member refuses; the host
-   lock enforced across authorization and mutation rather than documented.
-   `t101` is 42 assertions host-free with five RED controls, including a delete
-   that dies INSIDE the call and a new process that must resume it.
+3. **A PROVEN containerlab unit lifecycle** — **SATISFIED 2026-09-20.**
+   Substrate-1 (separate labs per unit, with inter-lab links) is **DEMONSTRATED**:
+   a per-unit release/deploy cycle completed with **no manual intervention**, the
+   rebuilt unit kept none of its container ids, the other two kept all of theirs
+   at mid-teardown and after, the fabric returned to 3728/3728 and `admit-s2`
+   returned ADMIT. See `E-LIFECYCLE-01-UNIT-REBUILD.md`.
 
-   **RE-RUN 2026-09-20 WITH THE ENGINE DEPLOYED: the transition works; the lab
-   deletion no longer refuses.** Substrate-1 is **still NOT DEMONSTRATED**, but
-   the blocker has MOVED OFF THE ENGINE. What now fails is
-   `network:c12-oob-dc1-pod002 is PRESENT after cleanup` — `c12-ztp-<unit>` is a
-   plain docker container with no ledger entry, holding the unit's oob network
-   open. That single gap has now blocked `--recover` (12 Sep), recovery from a
-   failed teardown (17 Sep), and the teardown itself (20 Sep).
+   Getting there took three distinct fixes, each a real defect:
+   - the ownership engine judged a half-deleted object by identity EQUALITY, so a
+     teardown invalidated its own authority — replaced by a durable
+     `CONFIRMED -> DELETING -> ABSENT` transition (`eddc5b4`, `t101`);
+   - that fix's own log line used the wrong arity and broke cleanup on a real
+     host, invisible to a fault test whose fake accepted any arity (`2a28426`);
+   - the serving layer created per-unit ZTP servers and never destroyed them, so
+     the unit's network could not be deleted — it now has a destroy, called
+     before the teardown (`7cc4531`, `t102`).
 
-   **Next fix, bounded:** make the unit's ZTP server a ledger resource, or have
-   the unit release tear it down as part of the unit. Nothing else stands between
-   this substrate and a demonstration.
-   Stage 40 destroys the whole lab (`40-topology.sh:61`) then one full deploy
-   because clab refuses a second filtered deploy (`:153`, the bug that motivated
-   this). The new driver **cannot** deploy pod 2 after pod 1 with that mechanism.
-   Choose and **validate (an L1 spike)** exactly one substrate: separate labs per
-   pod/shared-tier (and how inter-lab links are wired), a proven non-destructive
-   full-lab reconcile, or a lower-level (below-clab) lifecycle manager. No build
-   until one is demonstrated.
+   **This prerequisite no longer blocks the build.**
+
 4. **A scoped SoT delta/rollback contract** — §4-P4 in full (plan/apply, field
    ownership, ordering, drain, revision stamp, partial-failure recovery, rollback,
    idempotency gate).
