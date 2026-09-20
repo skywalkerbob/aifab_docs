@@ -194,8 +194,15 @@ in conflict. The split of authority:
    preempt, or converge R then R+1 — so a reconcile never chases a moving target.
    The run is complete only at full convergence to *that* manifest; quarantine
    requires explicit, recorded acceptance.
-3. **A PROVEN containerlab unit lifecycle** — **SATISFIED 2026-09-20.**
-   Substrate-1 (separate labs per unit, with inter-lab links) is **DEMONSTRATED**:
+3. **A PROVEN containerlab unit lifecycle** — **PARTLY satisfied 2026-09-20.**
+   **Substrate isolation and per-unit rebuild: DEMONSTRATED.**
+   **Ownership-safe unattended teardown: NOT YET** — the stop that made the
+   cycle unattended deletes by name with no durable identity, launders an
+   unreadable Docker read into "absent", and runs outside the canonical lock.
+   See `E-LIFECYCLE-01-UNIT-REBUILD.md` §7a. Do not treat this prerequisite as
+   closed until the corrected ownership path has real-host evidence.
+
+   The functional property that IS demonstrated:
    a per-unit release/deploy cycle completed with **no manual intervention**, the
    rebuilt unit kept none of its container ids, the other two kept all of theirs
    at mid-teardown and after, the fabric returned to 3728/3728 and `admit-s2`

@@ -1,10 +1,20 @@
-# E-LIFECYCLE-01 — §9.3 substrate-1: DEMONSTRATED
+# E-LIFECYCLE-01 — substrate isolation DEMONSTRATED; ownership-safe teardown NOT YET
 
-> **STATUS: CLOSED 2026-09-20.** The per-unit release/deploy cycle completed
-> with **no manual intervention**, and `admit-s2` returned **ADMIT** with
-> **S1 ADMIT**. Separate-labs-per-unit is the unit-lifecycle substrate. The
-> sections below are the record of how it got there — three failures, each a
-> different defect, each fixed. Nothing here is pending.
+> **STATUS 2026-09-20, split deliberately, because one half is proven and the
+> other is not:**
+>
+> - **Substrate isolation and per-unit rebuild: DEMONSTRATED.** pod002 was
+>   destroyed and rebuilt while pod001 and core remained byte-identical, and the
+>   fabric returned to 3728/3728 with `admit-s2` ADMIT. That is a real functional
+>   property of separate-labs-per-unit and it holds.
+> - **Ownership-safe unattended teardown: NOT YET DEMONSTRATED.** The cycle ran
+>   unattended, but the implementation that made it unattended departed from the
+>   authorized contract, so what it demonstrated is that the *mechanism* works —
+>   not that it is *safe*. See §7a.
+>
+> The distinction matters: an unattended teardown that can delete a stranger's
+> container, or treat an unreadable Docker as an absent one, is not a lifecycle
+> anything should be built on.
 
 **Date:** 2026-09-17
 **Fabric:** S2 on `gpufab-s11-fabric`, unit `dc1-pod002` only. S1 not touched.
@@ -40,8 +50,9 @@ kept **none** of its container ids, the untouched units kept **all** of theirs �
 at mid-teardown *and* after. Fabric back to **3728/3728**, 0 unreadable,
 **`admit-s2: ADMIT`** with **`S1 ADMISSION: ADMIT`**.
 
-**No hand touched it.** That is the whole criterion: every previous attempt
-needed a `docker rm` of the unit's ZTP server.
+**No hand touched it** — every previous attempt needed a `docker rm` of the
+unit's ZTP server. That establishes the functional property. It does **not**
+establish an ownership-safe teardown; see §7a.
 
 ## 2. Two distinct blockers
 
@@ -169,6 +180,41 @@ gate's fingerprint *and* by an independent container-identity guard, fabric
 **3728/3728** and **32/32 EVPN** with 0 unreadable, **`admit-s2: ADMIT`** with
 **`S1 ADMISSION: ADMIT`**. The S2 pin was re-taken at `2a28426` because the
 engine the fabric runs changed — only `platform/tools` moved.
+
+## 7a. Why the teardown is not yet ownership-safe
+
+The stop that made the cycle unattended has three defects, each one a shape this
+codebase has already paid for, reproduced inside the fix meant to close an
+ownership gap:
+
+1. **It deletes by deterministic NAME with no durable identity**
+   (`ztp_stop_units.sh:42`). `docker rm -f "$name"` removes whatever currently
+   answers to that name. A foreign container that happens to share it would be
+   destroyed. This is precisely what `Resource.identity()` exists to prevent —
+   *a name is not an identity* — and the ownership engine has refused exactly
+   this kind of deletion since it was written.
+2. **It launders UNREADABLE into ABSENT** (`ztp_stop_units.sh:50`). The presence
+   read is `docker ps -aq ... 2>/dev/null`; if Docker fails, the output is empty
+   and the script concludes the container is gone and reports success. That is
+   binding rule 2 (a check that observed nothing is a FAILURE) and rule 7 (never
+   swallow the evidence), both broken in one line.
+3. **It runs OUTSIDE the canonical lock** (`c12-unit-labs.sh:278`). The stop is
+   invoked before `unit_executor.py`, which is where `HostLock` is taken — so
+   serve, stop and release are concurrently mutable against each other. The same
+   change that added lock enforcement to `release_all` left this outside it.
+
+And the comment claiming **"symmetric ownership at the creating layer"** was an
+assertion, not a fact: that layer recorded neither authorship nor Docker ID, so
+it owned nothing in any sense the engine would recognise.
+
+**The corrected path** records each server's Docker ID durably at creation,
+binds the stop to the canonical lock, refuses on unreadable or changed identity,
+and retires only after measured absence — the same
+`CONFIRMED -> DELETING -> ABSENT` discipline the executor now uses.
+
+**No further destructive cycle will be run for this.** Both fabrics stay
+admitted; the corrected path takes its real-host evidence from the next
+genuinely needed lifecycle operation.
 
 ## 6. Also found
 
