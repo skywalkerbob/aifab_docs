@@ -545,7 +545,15 @@ durable release is a worse promise than none.**
 containers: no containerlab label, no ledger entry. They restart on host boot and
 hold the `c12-oob-*` networks open, so the network delete fails and `--recover`
 cannot complete. Recorded 2026-09-12; **it then blocked recovery from a failed
-teardown on 2026-09-17.** Still open.
+teardown on 2026-09-17**, and a unit teardown on 2026-09-20. Each was cleared by
+hand — the hand-operation the ownership model exists to eliminate.
+
+Closed in code 2026-09-20 by giving the creating layer a destroy *and* an
+ownership record: `ztp_serve_units.sh` claims the name before creating and
+confirms the container's docker ID after, into a serving ledger derived once
+from the executor's (`tools/ztp_ownership.py: serving_ledger()`), and
+`ztp_stop_units.sh` runs the same `CONFIRMED -> DELETING -> ABSENT` transition
+under the executor's own `$LOCK`. **No real-host evidence yet** — see §15.6.
 
 ### 15.4 The teardown that invalidated its own authority
 The defect that produced the newest engine work. A per-unit teardown refused
@@ -584,6 +592,143 @@ none is exclusive, so a partial teardown leaves cross-unit links standing.
 
 **Blast radius was exactly the unit named.** That is the property the incremental
 architecture most needs, and it survived the failure.
+
+### 15.6 The fix that reintroduced the defects it was closing
+
+The most instructive defect in this document, because nothing failed and every
+stage was green.
+
+The stop written to close §15.3 worked: pod002 was destroyed and rebuilt
+unattended, 3728/3728, ADMIT. It was then rejected on review, for three defects
+that this codebase had already diagnosed, fixed elsewhere, and written binding
+rules about — all three re-created inside the patch that was closing an
+ownership gap:
+
+| what it did | the rule it broke | where that rule already existed |
+|---|---|---|
+| `docker rm -f "$name"` — deleted by deterministic NAME | a name is not an identity | `Resource.identity()`, `authorize_delete()`, §15.4 |
+| `docker ps -aq ... 2>/dev/null` — empty output read as ABSENT | rule 2 (observed nothing = FAILURE), rule 7 (never swallow evidence) | §12.4, §13.4 |
+| ran before `unit_executor.py` took the lock | authorize and mutate under ONE held lock | `Transaction.release_all`'s own lock guard, added in the same change |
+
+And its comment asserted **"symmetric ownership at the creating layer"** while
+that layer recorded neither authorship nor docker ID. The claim was the design;
+the code was a name match.
+
+**Why it happened is the part worth keeping.** The fix was written in shell,
+beside the thing it was fixing, instead of calling `tools/ownership.py` — which
+already implements all three correctly. A second implementation of an idea is a
+second thing to get wrong, and this one got wrong precisely the parts the first
+implementation had already been corrected on. *Proximity to the bug is not the
+same as proximity to the fix.*
+
+**The correction.** `tools/ztp_ownership.py` gives the serving layer the SAME
+machinery, not a copy of it: `Ledger`, `authorize_delete`, `HostLock`. Docker is
+read as a **tristate** — `PRESENT(id)` / `ABSENT` / `UNREADABLE` — and
+UNREADABLE is never a state, only a refusal. `ztp_stop_units.sh` contains no
+`docker` call at all, which is enforced by an assertion rather than by intent.
+The serving ledger is separate from the executor's (the executor cannot create
+these, so its have-check must not find them) but the LOCK is the same one, which
+is what actually orders serve, stop and release against each other.
+
+**And the first correction was itself rejected**, by an adversarial cross-check
+that returned "No". It found the same three defects **one file over**, in the
+create path of the same feature: `ztp/oob/serve.sh` force-deleted whatever
+answered to the name, by name, with stderr suppressed and the failure
+swallowed. It found that claim, create and confirm were three separate
+processes, so the canonical lock was released between them and the `docker run`
+happened under none of it — an interleaved teardown leaving a container no
+future teardown would ever be permitted to remove. It found a **deadlock**: a
+server that started and then failed its self-test was claimed, never confirmed,
+refused by every later teardown, and since a failed stop aborts c12 before the
+executor, `--recover` could not run at all — a regression against the very
+version that had been rejected. And it found the **network** read accepting the
+bare substring `"not found"`, which matches `docker: command not found`, so the
+one statement this path exists to make could be printed about a network never
+read.
+
+The fix is a single `serve` verb holding **one** lock across remove-if-ours →
+claim → create → confirm, which closes the orphan window and the deadlock
+together; `docker rm -f <id>` rather than `<name>`; and one derivation of how
+to call docker, since `serve.sh` created under `sudo docker` while the tool
+probed with a bare `docker`.
+
+**A second round found four more, and the sharpest was caused by the previous
+round's fix.** Switching to `docker container inspect` — correct, because plain
+`docker inspect` also resolves images — changed the error text from
+`No such object` to `No such container`, and the matcher still looked for the
+old phrase. On a real host every absent container read UNREADABLE, so every
+stop failed and every serve on a clean host refused at step one: both outages
+this feature exists to prevent, produced by hardening one line and not the line
+that read its output. The suite stayed 93/0 because the fake emitted the other
+phrasing, and the string lived in the matcher, the docstring and the fake —
+**three copies of one assumption with no independent source**, which is rule 3
+in a form that is easy to miss because none of the three is a "value".
+
+The remedy was not the right phrase but no phrase at all:
+`docker ps -aq --no-trunc --filter name=^X$`, with the classification taken
+from **whether the daemon answered** — `rc != 0` UNREADABLE, `rc == 0` and no
+rows ABSENT, one row PRESENT, several UNREADABLE. `docker ps` lists only
+containers, so the image fallback goes by construction rather than by a flag,
+and no `--format` template remains to get wrong. The same shape fixed
+`observe_network`, whose round-1 hardening had introduced the mirror bug.
+
+Round 2 also reversed a judgement call that was **strictly worse than the
+original defect**: confirming a container when the create had FAILED. The
+argument was "step 1 measured absence under this lock, so anything here is
+ours" — the opposite threat model to the one used three functions away, in the
+same commit, to justify deleting by id. A stranger taking the name makes the
+`docker run` fail with a 125 conflict, and confirming there records the
+STRANGER's id as ours; the next teardown then deletes it precisely, by id, and
+reports success. Durable, replayed, unrecoverable. The resolution is the
+principle the whole feature is about: **the creator reports the id it made**,
+which is the only signal that separates "started, then failed its self-test"
+(must be owned, or the unit deadlocks) from "lost a name race" (must own
+nothing, or the stranger is destroyed).
+
+**The cross-check also found four assertions that were green while the property
+they named was false** — a `--recover` guard matched over a window containing
+three prose mentions of the word, a `grep -q 'confirm'` standing in for the
+identity model the whole fix rests on, and a DELETING-ordering check read from
+the ledger *after* the run, when the ordering is the entire reason the marker
+exists. **A test suite can reproduce the defect class it was written to catch.**
+
+**It has no real-host evidence, and the pin was deliberately not moved.** The
+live fabrics still run the rejected code; `admit-s2`'s behavioural pin describes
+what the fabric RUNS, so moving it for code no fabric runs would be a false
+statement. The corrected path takes its evidence from the next genuinely needed
+lifecycle operation — not from a destructive cycle staged to produce it.
+
+**Controls** (`tests/t102-ztp-stop-units.sh`, 128 assertions): a foreign
+same-name container is refused and survives; a container REPLACED between
+authorize and delete is not the one removed; a failed docker read before the
+delete refuses instead of reporting "already absent", and one AFTER it neither
+succeeds nor retires; an unreadable NETWORK read prints no all-clear; DELETING
+is recorded BEFORE the mutation, measured at the instant of the `rm`; a held
+canonical lock makes both stop and serve refuse having mutated nothing; the
+create path refuses to build over a stranger, records nothing when it loses a
+name race, and still owns what it made when its self-test fails; a hung create
+is bounded and its whole process group killed; a SIGKILLed owner takes its
+child with it.
+
+`tests/t102-red.sh` reintroduces each of **28** defects to a copy of the tree
+and requires t102 to go red **on the NAMED assertion**. Three guards make that
+mean something: the mutation must land (an unmatched anchor is a FAILURE — two
+earlier RED controls reported "15 passed" while their mutation silently never
+applied); the mutated tree must still parse (a syntax error fails everything,
+and a third of the cases would then report PASS on it); and the failure must be
+the named one, not merely some failure.
+
+**The red control paid for itself in every round.** Four of the first six
+expectations were wrong, one exposing a guard that was unreachable because a
+different check refused first. Later, the `observe` redesign invalidated four
+mutation anchors at once and all four reported "measured nothing" rather than
+passing. And three of the controls were themselves broken in ways that made
+them measure nothing: an escaped apostrophe left a literal `'\''` in an
+assertion string so no expectation could match it; a timeout probe watched the
+direct child, which dies either way, and so could not see the surviving
+grandchild; and `func ... &` made `$!` a subshell, so a SIGKILL never reached
+the process under test — the same shape as `flock <file> <cmd> &`, where the
+pid is not the lock holder. **The controls are part of the system under test.**
 
 ## 16. Process defects
 
@@ -649,10 +794,20 @@ Not tested by controlling the phase deliberately.
 
 ## 18. E-LIFECYCLE-01 — the unit lifecycle
 
-Tested `BRINGUP-ARCHITECTURE.md` §9.3's first substrate. **NOT DEMONSTRATED** —
-see §15.4. Evidence design worth keeping: **container identity** proves both
-halves with one measurement, since a container never destroyed keeps its docker
-ID, so the target's IDs must *differ* and the others' must be *identical*.
+Tested `BRINGUP-ARCHITECTURE.md` §9.3's first substrate. The verdict is **split**,
+because one half is proven on a real fabric and the other is not:
+
+- **Substrate isolation and per-unit rebuild: DEMONSTRATED** (2026-09-20). pod002
+  was destroyed and rebuilt with no manual intervention while pod001 and core
+  stayed byte-identical; the fabric returned to 3728/3728 and `admit-s2` returned
+  ADMIT. 48/48 of pod002's containers gone at mid-cycle, 0/48 surviving; 48/48 and
+  10/10 of the others identical throughout.
+- **Ownership-safe unattended teardown: NOT YET DEMONSTRATED.** What made the
+  cycle unattended was a stop that was subsequently rejected — see §15.6.
+
+Evidence design worth keeping: **container identity** proves both halves with one
+measurement, since a container never destroyed keeps its docker ID, so the
+target's IDs must *differ* and the others' must be *identical*.
 
 ---
 
@@ -663,8 +818,8 @@ ID, so the target's IDs must *differ* and the others' must be *identical*.
 | item | state |
 |---|---|
 | **D2 re-adding agent** | **unknown.** The largest open correctness question |
-| **§9.3 substrate-1** | NOT DEMONSTRATED. Transition implemented and fault-tested; the *demonstration* needs a real-fabric rerun |
-| **ZTP servers outside the ledger** | open; has now blocked recovery twice |
+| **§9.3 substrate-1** | **split.** Isolation + per-unit rebuild DEMONSTRATED on a real fabric; ownership-safe unattended teardown NOT YET — §15.6 |
+| **ZTP servers outside the ledger** | closed in code (`tools/ztp_ownership.py`); **no real-host evidence yet**, and the pin was deliberately not moved |
 | **`--deploy-unit` re-serves ALL units** | the serving step sits outside the ownership scoping |
 | **residual composition** | ~6.5 s not separated into detector vs route propagation |
 | **scale beyond 2.2×** | nothing measured above s2-1024; the ladder goes to s5-32768 |
