@@ -123,9 +123,101 @@ The countermeasures landed with the fixes, not after them:
 * `tests/t106-red.sh` (12 mutations) and `tests/t107-red.sh` (9 mutations) put
   each defect back and require the test to fail on the assertion that names it.
 
-## 7. Next
+## 7. Runs 6 and 7 — the render works; the HOST does not survive the fabric
 
-One more `n2-standard-80` attempt, same fixed target and no fallback:
+### Run 6: VOID, the deploy destroyed its own fabric
+
+The `pyexec` fix landed exactly as intended — the render, which run 5 could not
+perform at all, completed and verified itself:
+
+    [oob-ztp] staged tree verified COMPLETE: 50 device artifacts, 322 files
+              rendered 167 device(s), switches=50
+    [oob-ztp] swap complete — served-root inode preserved
+              dhcp-range 172.28.0.0/24 covers 172.28.0.4
+
+Then:
+
+    docker: Error response from daemon: network c12-oob-dc1-pod001 not found
+      FAIL ZTP serving did not come up for every unit
+
+**Cause, and it was in the probe's own command:** no `--keep`. The executor's
+contract is that a transaction RELEASES everything it created unless `--keep`
+says otherwise, and serving runs after it because serve.sh puts each server ON
+its unit's management network. So the run built 169 containers, configured 117
+host devices, destroyed them, returned `rc=0`, and served ZTP onto a network
+that no longer existed. Every other deploying caller (`a5-partial-teardown.sh`,
+`a6-canary-path.sh`) passes `--keep`.
+
+Fixed twice over: the probe's command now carries it, and **c12 refuses `--ztp`
+on a deploying run without `--keep`** in its first few lines rather than after
+twenty minutes of work. `--ztp --no-deploy`, which re-serves an already standing
+fabric, is untouched.
+
+### Run 7: VOID, and the host lost its own networking
+
+The deploy started and built the lab. Then the host went silent, and the serial
+console says why:
+
+    10:09:34  systemd-networkd[1303]: veth1fc0901: Gained IPv6LL   (425 such events)
+    10:11:40  kernel: neighbour: arp_cache: neighbor table overflow!   (185 lines)
+    10:11:40  kernel: net_ratelimit: 6400 callbacks suppressed
+              ERROR: (gcloud.compute.ssh) [/usr/bin/ssh] exited with return code [255]
+
+**Three findings.**
+
+**F1 — the disposable host had no sim-scale sysctls.** 169 containers across
+2306 links against a kernel default of 128/512/1024 ARP entries. The values
+existed in TWO byte-identical copies (`terraform/startup.sh`,
+`deploy/00-bootstrap.sh`) and `a4-host.sh` had neither, while its own comment
+asserted the opposite:
+
+    # Not OOM, not neighbour-table overflow (00-bootstrap already raises
+    # gc_thresh to 4096/8192/16384), not conntrack.
+
+a4-host.sh does not run 00-bootstrap. Every host it has created ran on the
+defaults, and the comment ruling that cause out is why it was never suspected.
+
+Fixed: `deploy/host_sysctls.conf` is the one source; stage 00 installs it, a4
+embeds it at VM creation before any fabric exists, terraform carries a copy
+t106 proves identical line by line, and all three **read gc_thresh3 back out of
+the kernel** — `sysctl --system` exits 0 having applied nothing when the file
+does not parse.
+
+**F2 — D9 was live.** 425 `systemd-networkd … veth` events is D9's precondition
+on the box: the defect that took a host's own networking down mid-build on
+2026-09-07. `host_harden.sh --assert` already existed and nothing called it.
+Fixed: **gate 1c** now measures host preparation — sysctls in the kernel, D7/D9
+in effect — before the deploy, and VOIDs if either is missing.
+
+**F3 — the probe said something false.** Its verdict read:
+
+    VOID the deploy never started (no unit became active within the launch
+         deadline); the density was NOT measured and the host is not implicated
+
+Every clause was wrong. The deploy started, the deadline was not what elapsed,
+and the host was the entire problem. Cause: `lib-n2probe.sh:62` answered
+`never_started` when the RUNNER failed — three definite claims manufactured out
+of one unanswered query, which is exactly the laundering CLAUDE.md §3 rule 2
+forbids, inside the instrument built to enforce it.
+
+Fixed: `unreadable` is its own state end to end; the deadline carries the last
+observed state out instead of overwriting it; the verdict names it, says the
+host **IS** implicated, and points at the serial console. `never_started` now
+says the host *answered* and reported no unit — the fact it actually describes.
+
+### Four of my own assertions were blind, and the red controls caught them
+
+Three grepped for a string that also appears in the comment explaining the
+defect, so renaming a gate or re-adding a duplicate copy still passed. One used
+a count threshold that went stale when a fourth fact map appeared. One mutation
+was also unfaithful: disabling a branch's condition left a second code path
+defending the same property, so the control passed while measuring nothing.
+
+t106 is now 164 assertions and t106-red a baseline plus 25 mutations.
+
+## 8. Next
+
+Another `n2-standard-80` attempt, same fixed target and no fallback:
 **50 VMs, 2266 configured, 2266 established, zero unreadable, no swap,
 validated evidence, verified teardown.** Nothing about the hardware question has
 changed; the three defects between the probe and the answer are closed.
