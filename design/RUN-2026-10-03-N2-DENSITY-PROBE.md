@@ -215,12 +215,84 @@ defending the same property, so the control passed while measuring nothing.
 
 t106 is now 164 assertions and t106-red a baseline plus 25 mutations.
 
-## 8. Next
+## 8. Run 8 — PASS. The floor holds.
 
-Another `n2-standard-80` attempt, same fixed target and no fallback:
-**50 VMs, 2266 configured, 2266 established, zero unreadable, no swap,
-validated evidence, verified teardown.** Nothing about the hardware question has
-changed; the three defects between the probe and the answer are closed.
+    gate 1   OK   /dev/kvm root-writable, kvm_intel, KVM accelerator
+    gate 1b  OK   vrnetlab/sonic_sonic-vs:202505-ztp present (9.04 GB)
+    gate 1c  OK   gc_thresh3=16384 (read out of the kernel)
+             OK   D7 masked, D9 drop-in present, 1/1 device unmanaged
+    gate 2   launch_rc=0, unit active
+             est=2266 cfg=2266 vms=50 swap_mb=0 load=45.16 memfree_gb=106
+    verdict  PASS 50 VMs converged to 2266/2266 with no swap
+    teardown instance absent, no orphaned disks, no orphaned addresses — VERIFIED
+
+**What was measured, and where:**
+
+| fact | value | measured by |
+|---|---|---|
+| switch VMs | 50 / 50 healthy | `docker ps` on the host |
+| host containers | 118 (+1 ZTP server = 169) | the plan derives 169 |
+| BGP configured | **2266** | per-switch `show bgp summary json`, summed |
+| BGP established | **2266** | same, `state == "Established"` |
+| switches unreadable | **0** | a non-zero here VOIDs the run |
+| swap | **0 MB** | 213 GB used of 322, load 42 |
+| density | **0.625 VM/vCPU** | bound 0.75 |
+| EVPN + dataplane | t92 **PROVEN 15/0** | 4 VTEPs, 14/14 EVPN established, a real tenant forward, and a negative control proving the comparison can fail |
+| c12's own verdict | **OK** | independent of the probe |
+
+2266 is `expected.py`'s derived `bgp_peer_series` for this fixture, so the check
+compares the boxes against the MODEL rather than against itself. The EVPN leg
+carries its own negative control: a corrupted `VXLAN_TUNNEL` is detected, so the
+comparison is known to be capable of failing.
+
+### Two instrument defects found by distrusting the PASS
+
+Neither changes the result; both were found by asking what the green actually
+measured.
+
+**The sample lied about its own timing.** `t+0s est=2266` was stamped thirteen
+minutes before the sample was taken: `now` is captured at the top of the
+iteration and printed at the bottom, and the gather ssh's to every switch, so a
+switch still booting blocks until it answers and one iteration implicitly waited
+for the whole fabric. The numbers were real; **the convergence TIME was never
+measured** — this run cannot say whether the fabric took two minutes or
+thirteen. Now stamped when the sample finishes, with the gather's duration
+beside it.
+
+**`BGP_WAIT` was advisory.** Because that gather blocks, the bound was only
+evaluated BETWEEN iterations; a gather that never returned would have run past
+it indefinitely — on a host that had stopped answering, forever. Now bounded,
+killing the process GROUP on overrun, and an overrun emits `gather_timed_out=1`
+rather than an empty success that would read as zero.
+
+### What this does and does not establish
+
+**Does:** one s3-4096 pod — 50 SONiC VMs, 2266 BGP sessions, 4 VTEPs — runs and
+converges on a single `n2-standard-80` at 0.625 VM/vCPU with no swap, on a host
+prepared by `a4-host.sh` alone. The 0.75 bound and the 80-vCPU floor in
+`tools/gcp_catalog.yaml` are supported by measurement at this rung.
+
+**Does not:** declare a baseline, write any pin, or say anything about the
+**cross-host path**. s3-4096 is 35 pods with ~800 cross-host links, and `c12` is
+still a one-host launcher. It also does not establish a convergence time, for
+the reason above.
+
+## 9. Next
+
+The hardware question is answered. What remains, in order:
+
+1. **The cross-host path.** Every rung above s2 needs it and nothing has
+   measured it. `c12` deploys one host; s3-4096 is 35 pods across 35 hosts with
+   ~800 cross-host links. This is the real blocker for the ladder, and it is a
+   different question from density.
+2. **D9 at scale.** Gate 1c confirms the drop-in is in effect — against the ONE
+   veth/bridge that exists before the deploy. Run 7 logged 425
+   `systemd-networkd … veth` events, so the effect at several hundred devices
+   is still unproven. The assert already does the right thing when devices
+   exist; it should be re-run AFTER the lab is up.
+3. **Convergence time**, now that the sample is honestly stamped.
+4. A consistency follow-up: `c12-unit-labs.sh` still resolves its own
+   interpreter rather than going through `deploy/pyexec.sh`.
 
 Known and deliberately NOT changed: `c12-unit-labs.sh` still resolves its own
 interpreter with the venv-preferred-plus-fallback form rather than through
