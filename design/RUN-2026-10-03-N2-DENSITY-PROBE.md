@@ -1,12 +1,22 @@
-# n2-standard-80 density probe — the instrument now explains itself; two code defects stand in the way
+# n2-standard-80 density probe — one S3 pod QUALIFIED at 50 VMs / 80 vCPU
 
-**Date:** 2026-10-03
-**Question:** may the ladder above 1024 GPUs be planned on `n2-standard-80`?
+**Date:** 2026-10-03 (runs 1-8); header corrected 2026-10-05
+**Question:** may one S3 pod be carried by a single `n2-standard-80`?
 **Host:** `gpufab-n2probe-01`, n2-standard-80, us-central1-a, disposable, TTL 4h
 **Fixture:** `tests/fixtures/n2probe-1pod.yaml` — one s3-4096 pod
 **Derived target:** 50 switch VMs, 2266 BGP peer series, 0.625 VM/vCPU
-**Outcome:** **VOID** — the deploy failed; the density was NOT measured and the
-host is NOT implicated. S1 and S2 untouched. Teardown VERIFIED.
+**Outcome (run 8):** **PASS** — 50/50 VMs healthy, 2266 configured and 2266
+established counted per-switch on the boxes, 0 unreadable, swap 0, t92 PROVEN
+15/0, c12's own verdict OK, teardown VERIFIED. S1 and S2 untouched throughout.
+
+**Scope of the result:** this qualifies the **0.625 operating point**
+(50 VMs / 80 vCPU) for one S3 pod. It does **not** establish the 0.75 VM/vCPU
+boundary, which remains supported by the separate S1 calibration (48 VMs / 64
+vCPU); nothing in these eight runs probed the region between 0.625 and 0.75.
+It says nothing about the cross-host path — see §9.
+
+Runs 1-7 each ended on a defect rather than a finding; §§2-7 keep that record
+because the defects are the useful part.
 
 ---
 
@@ -16,15 +26,18 @@ host is NOT implicated. S1 and S2 untouched. Teardown VERIFIED.
 |---|---|
 | nested KVM on n2-standard-80 | **PASS** (runs 3, 5) — `/dev/kvm` 660 root:kvm root-writable, `kvm_intel` loaded, KVM accelerator |
 | the NOS image on a fresh host | **PASS** (run 5) — stage 10 loads `vrnetlab/sonic_sonic-vs:202505-ztp` from the GCS cache, 9.04 GB, confirmed by `docker image inspect` |
-| the arithmetic floor | **PASS** — 50 VMs on 80 vCPU is 0.625 VM/vCPU against a 0.75 bound; 200 GB of guest RAM is 0.637 of MemTotal against 0.85 |
+| the arithmetic floor | **PASS** — 50 VMs on 80 vCPU is 0.625 VM/vCPU, inside the 0.75 bound; 200 GB of guest RAM is 0.637 of MemTotal against 0.85. Being inside the bound is not evidence FOR the bound. |
 | c12 builds the single pod | **PASS** (run 5) — 1 unit topology, 50 `sonic-vm` nodes, 2306 links, 117 devices configured, `executor rc=0` |
-| **50 SONiC guests converging to 2266/2266 on 80 vCPU** | **STILL UNMEASURED** |
+| **50 SONiC guests converging to 2266/2266 on 80 vCPU** | **PASS** (run 8) — see §8 for what was measured and where |
+| the 0.75 VM/vCPU boundary itself | **not probed here** — supported by the S1 calibration (48/64); these runs sat at 0.625 |
+| the cross-host path | **UNMEASURED** — §9 |
 
-The probe has now been run five times. Runs 1–4 ended on defects in the
-instrument or in the deploy path, not on findings about the hardware. Run 5 is
-the first that produced a *diagnosis* rather than a puzzle, and that is the
-change worth recording: the verdict named the failing step, the evidence archive
-was on the workstation before teardown, and teardown proved absence.
+The probe was run eight times. Runs 1-7 each ended on a defect in the
+instrument or in the deploy path rather than on a finding about the hardware,
+and run 5 is where that changed in kind: it produced a *diagnosis* rather than a
+puzzle — the verdict named the failing step, the evidence archive reached the
+workstation before teardown, and teardown proved absence. Run 8 is the
+measurement.
 
 ## 2. Run 5, step by step
 
@@ -268,31 +281,58 @@ rather than an empty success that would read as zero.
 ### What this does and does not establish
 
 **Does:** one s3-4096 pod — 50 SONiC VMs, 2266 BGP sessions, 4 VTEPs — runs and
-converges on a single `n2-standard-80` at 0.625 VM/vCPU with no swap, on a host
-prepared by `a4-host.sh` alone. The 0.75 bound and the 80-vCPU floor in
-`tools/gcp_catalog.yaml` are supported by measurement at this rung.
+converges on a single `n2-standard-80` at **0.625 VM/vCPU** with no swap, on a
+host prepared by `a4-host.sh` alone. That qualifies the 0.625 operating point
+and the 80-vCPU floor for one S3 pod.
 
-**Does not:** declare a baseline, write any pin, or say anything about the
-**cross-host path**. s3-4096 is 35 pods with ~800 cross-host links, and `c12` is
-still a one-host launcher. It also does not establish a convergence time, for
-the reason above.
+**Does not support the 0.75 bound.** A measurement at 0.625 sits inside the
+bound and says nothing about where the bound is; 0.75 remains supported by the
+S1 calibration (48 VMs / 64 vCPU), and the region between the two is unprobed.
+
+**Does not** declare a baseline, write any pin, or say anything about the
+**cross-host path**. S3-4096 builds **5 pods on 5 hosts** — 270 switches and 595
+host nodes, 865 nodes in total, 11,730 local links and **800 cross-host links**
+(derived from `fabric_model.place()`, cross-checked independently). The 35 in
+`addressing.envelope.pods` is the shared **addressing** envelope, which sizes the
+management address plan and is NOT a build size: s5-32768 is the rung that
+builds 35 hosts (2055 switches, 6800 cross-host links). `c12` is still a
+one-host launcher. This run also does not establish a convergence time, for the
+reason above.
 
 ## 9. Next
 
 The hardware question is answered. What remains, in order:
 
-1. **The cross-host path.** Every rung above s2 needs it and nothing has
-   measured it. `c12` deploys one host; s3-4096 is 35 pods across 35 hosts with
-   ~800 cross-host links. This is the real blocker for the ladder, and it is a
-   different question from density.
-2. **D9 at scale.** Gate 1c confirms the drop-in is in effect — against the ONE
-   veth/bridge that exists before the deploy. Run 7 logged 425
-   `systemd-networkd … veth` events, so the effect at several hundred devices
-   is still unproven. The assert already does the right thing when devices
-   exist; it should be re-run AFTER the lab is up.
-3. **Convergence time**, now that the sample is honestly stamped.
-4. A consistency follow-up: `c12-unit-labs.sh` still resolves its own
-   interpreter rather than going through `deploy/pyexec.sh`.
+**Prove the cross-host MECHANISM on a two-host slice, not the full five-host
+S3.** Every rung above S2 needs it and nothing has measured it: `c12` deploys
+one host, and S3-4096 builds 5 pods on 5 hosts with 800 cross-host links. The
+mechanism is identical at two hosts and at five; the slice is what makes it
+cheap enough to iterate on, and the full five-host build should only be
+considered after the two-host transport passes.
+
+Folded into that ONE acceptance run, so that D9-at-scale and convergence
+timing do not each cost a separate paid run:
+
+1. **Exact per-link identities** — the bridge and VXLAN identity of every
+   cross-host link, and UDP **14789**, asserted per link rather than in
+   aggregate.
+2. **Both MTU boundaries, and the adjacent failures** — the largest frame that
+   must pass and the smallest that must not, on both sides of each boundary.
+3. **Cross-host BGP/EVPN dataplane** — sessions across the host boundary, and a
+   tenant forward that actually traverses it.
+4. **Ownership-safe teardown and recovery** — the lifecycle leg that is still
+   only DEMONSTRATED for the substrate, not for unattended teardown.
+5. **`host_harden.sh --assert` AFTER all lab interfaces exist** — gate 1c can
+   only check the one veth that predates the deploy, and run 7 logged 425
+   `systemd-networkd … veth` events, so D9's effect at several hundred devices
+   is still unproven.
+6. **Honestly bounded convergence timestamps** — now that the sample is stamped
+   when it finishes and the gather is bounded, the convergence time is
+   measurable for the first time.
+
+A later consistency follow-up, not part of that run:
+`c12-unit-labs.sh` still resolves its own interpreter rather than going through
+`deploy/pyexec.sh`.
 
 Known and deliberately NOT changed: `c12-unit-labs.sh` still resolves its own
 interpreter with the venv-preferred-plus-fallback form rather than through
