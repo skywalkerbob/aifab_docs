@@ -242,20 +242,158 @@ UDP 14789 rule. Check the plan for what it **destroys**.
 **Stage C — one paid run,** two disposable hosts, all six legs in a single
 acceptance script, unconditional verified teardown of **both**.
 
-## 6. Open decisions
+## 6. Decisions — MADE 2026-10-06, and implemented
 
-1. **Ownership across two hosts.** One ledger per host (what exists) plus a
-   coordinator assertion that each host accounts for exactly its share, or a
-   host dimension added to `Resource`/`Ledger`? The first is cheap and provable
-   now but does not give cross-host mutual exclusion; the second is a change to
-   the engine every other check depends on. **Recommendation: one ledger per
-   host for this run,** with the limitation stated in the verdict rather than
-   waived — a declared deficiency belongs in a RED verdict, never an ADMIT.
-2. **MTU values.** No profile declares an MTU; 8896/8846/8796 exist only in
-   prose. They should become model-derived before a gate asserts them, or the
-   gate will be comparing the box against a number from a document.
-3. **`containerlab`'s `type: vxlan` link shape.** The emitter writes a
-   topology-level `type: vxlan` link; both design documents describe
-   `containerlab tools vxlan create` with tc redirect. `vxlan-stitch` appears
-   nowhere in any repo. **NOT DETERMINED** without the installed clab version —
-   settle it against clab 0.77 on a host before Stage B.
+Implementation and the strictly additive substrate apply are authorized. Stage C
+remains closed.
+
+### 6.1 Ownership: one ledger per host
+
+One existing `Ledger` and `HostLock` per physical host. **No host dimension is
+added to the ownership engine** — that would expand the blast radius of the one
+component every other check depends on without providing distributed locking,
+because the lock is host-local by construction (`ownership.py:231`: an
+`fcntl.flock` on a local file, with a process-local `_LOCK_HELD`).
+
+`gpufab-platform/tools/xhost_ownership.py` is the coordinator. Its five
+obligations:
+
+1. each host's complete share derived from manifest R — and it **refuses** to
+   invent one, because a coordinator that derives "what should be there" itself
+   is comparing one guess against another;
+2. each host's ledger must **equal** that share exactly;
+3. all facts archived, keyed by host;
+4. the union must cover R, nothing missing and nothing unexpected;
+5. **no cleanup inferred when either host is unreadable** — absent, empty and
+   unparseable archives are all `UNREADABLE`, never an empty set.
+
+The verdict is a **leg table**, not a boolean, with the mutual-exclusion leg a
+declared constant:
+
+    LOCAL_OWNERSHIP host-a: PROVEN
+    LOCAL_OWNERSHIP host-b: PROVEN
+    UNION_COVERS_R: PROVEN
+    CROSS_HOST_MUTUAL_EXCLUSION: NOT-PROVEN
+    OWNERSHIP VERDICT: RED
+
+**There is no code path to GREEN while that constant stands**, and `t110`
+asserts it is a constant rather than a condition — because the failure to guard
+against is someone relaxing a condition, not deleting a leg. No waiver: Stage C
+may prove the transport with this standing, and this RED is what stops that
+proof from authorizing a full S3 deployment.
+
+**A measurement that changed this contract.** On the §2 slice the `core` unit
+**straddles both hosts** — 8 switches each — while each pod sits wholly on one:
+
+    unit core         -> {host-pod001: 8,   host-pod002: 8}
+    unit dc1-pod001   -> {host-pod001: 169}
+    unit dc1-pod002   -> {host-pod002: 169}
+
+A containerlab lab cannot span hosts, so that unit becomes one lab per host
+carrying the **same name**, and `lab:c12-core` is legitimately claimed on both.
+The first version of obligation 4 would have called that a collision. It now
+compares against the per-host expectation: a name claimed by **more** hosts than
+R places it on is the finding; a name R places on two is not.
+
+### 6.2 MTU: one executable transport policy
+
+`gpufab-network/design/policy/transport.yaml` declares **inputs only**.
+`gpufab-platform/tools/transport.py` derives, and **refuses** a catalog that
+contains a derived key or omits an input — no defaults, because a default here
+is a second source for the value.
+
+    inputs    fabric_vpc_ip_mtu 8896, outer_ip_version 4,
+              inner_ethernet_header 14, outer_ipv4_header 20,
+              udp_header 8, vxlan_header 8, encapsulation_layers 2,
+              udp_destination_port 14789, gcp_subnet_reserved_addresses 4
+
+    derived   vxlan_overhead     = 14+20+8+8 = 50
+              cross_host_ip_mtu  = 8896 - 50 = 8846
+              tenant_ip_mtu      = 8846 - 50 = 8796
+
+Manifest R carries the derived values per rung. `gen_topology` reads the port
+rather than hardcoding it, and `t109` proves no consumer holds a literal — using
+the **AST**, because a grep for the number also matches the docstring that
+explains the defect.
+
+**The ICMP translation lives in one place.** `ping -s` counts payload, not
+packet size, so a probe for IP MTU `M` sends `M-28` (20 IPv4 + 8 ICMP) and its
+adjacent failure is `M-27`. The gate therefore locates **8846/8847** and
+**8796/8797** instead of a boundary 28 bytes away from the real one. The local
+9100 switch-port and 9500 veth MTUs remain measured postconditions, not catalog
+promises.
+
+> GCP VPC MTU is the maximum IP packet size and supports values through 8896 —
+> https://docs.cloud.google.com/vpc/docs/mtu
+
+### 6.3 Substrate: dedicated, disposable, additive
+
+`gpufab-platform/terraform/stage-c/`, its **own state prefix** in the same
+bucket. The existing `google_compute_instance.fabric` is not touched and gains
+no NIC; the control VPC is a read-only data source. S1/S2 zero-change is
+therefore structural, not a promise — this stack cannot plan a change to a
+resource it does not own.
+
+* two `n2-standard-96` hosts, `gpufab-xh-01` / `gpufab-xh-02`, tagged
+  `gpufab-xh` only — not `gpufab-fabric`, which carries the live fleet's rules
+* `nic0` on the existing control VPC, keeping SSH and external access
+* `nic1` on a new `gpufab-fabric-vpc` at MTU 8896 (read from the catalog), with
+  `delete_default_routes_on_create`, no external address and no NAT
+* ingress UDP **14789**, source the **exact** fabric subnet, `target_tags`
+  these hosts only, plus an explicit low-priority deny-all. **No 4789 rule** —
+  fabric VXLAN must never cross a host boundary under pod-atomic placement, so
+  if it appears there it is a placement bug to find, not traffic to permit
+* tunnel addresses are **outputs**, bound into R; the guest interface is
+  resolved by its assigned IP, never by a device name like `ens5`
+
+> A GCP firewall rule's port specification **is** the destination port, and
+> source-port rules are unsupported — https://docs.cloud.google.com/firewall/docs/firewalls
+
+The source port is also ephemeral — the ECMP entropy hash, measured at
+44719/45124/39733 across three packets — so a rule constraining it would drop
+traffic intermittently, which is harder to diagnose than dropping it outright.
+
+**`deploy/checks/stage-c-plan.sh` is the apply gate.** It reads the
+machine-readable plan and refuses on anything but `create`:
+
+    existing resources changed:   0
+    existing resources replaced:  0
+    existing resources destroyed: 0
+
+It also VOIDs a plan that creates **nothing** — otherwise "0 changes" reads as
+authorization for a run with no substrate. It does not apply, and it does not
+run `terraform init`: with the GCS backend that writes state and needs
+credentials, which is the operator's step, so it names it instead.
+
+### 6.4 The subnet formula was wrong, and worse than generally
+
+`scale-out-architecture.md` carried `prefix = 32 - ceil(log2(hosts + 3))` with
+the comment "network, gw, broadcast". GCP reserves **four** addresses in a
+primary IPv4 range — the first two and the last two.
+
+> https://docs.cloud.google.com/vpc/docs/subnets
+
+The undercount is wrong from **five hosts up**, which is exactly S3-4096's
+placed-host count: `+3` sizes five hosts into a `/29`, whose 8 addresses leave 4
+usable. **The subnet could not have held the fabric it was sized for.** Two,
+three and four hosts are unaffected, which is why it survived.
+
+Now `32 - ceil(log2(hosts + 4))` in `transport.py::fabric_subnet_prefix()`,
+refusing a prefix that cannot hold the hosts it was asked for, with the
+architecture document keeping the explanation and delegating the formula.
+
+## 7. Before the paid run
+
+Stage C stays closed until both:
+
+1. **Stage A green** — the remaining items are the device→host map threaded into
+   the probes, per-host execution and merge with a both-halves-measured
+   assertion, host-stratified sampling, unit-path convergence timing via the
+   existing `_phase_emit`, the per-link live-tunnel assertion, and the DF probe
+   driven from a SONiC switch.
+2. **containerlab 0.77's `type: vxlan` behaviour measured.** The emitter writes
+   a topology-level `type: vxlan` link; both design documents describe
+   `containerlab tools vxlan create` with tc redirect, and `vxlan-stitch`
+   appears nowhere in any repo. NOT DETERMINED without the installed version.
+   The Stage-C hosts are the right place to settle it — before the acceptance
+   run, not during it.

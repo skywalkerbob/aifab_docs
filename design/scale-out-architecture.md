@@ -1473,10 +1473,29 @@ big range: each region needs its own non-overlapping block. The prefix for a
 region is therefore derived from the hosts actually placed in it:
 
 ```
-prefix(region) = 32 - ceil(log2(placed_hosts(region) + 3))   # +3: network, gw, broadcast
+prefix(region) = 32 - ceil(log2(placed_hosts(region) + 4))
 ```
 
-carved from a supernet wide enough for every region, with the allocation
+**`+ 4`, and this was `+ 3` with the comment "network, gw, broadcast" until
+2026-10-06.** GCP reserves **four** addresses in a primary IPv4 range — the
+first two (network and default gateway) and the last two (second-to-last and
+broadcast) — so the usable count is `2**(32-prefix) - 4`.
+
+> https://docs.cloud.google.com/vpc/docs/subnets
+
+The undercount is not cosmetic: it is wrong from **five hosts up**, which is
+exactly S3-4096's placed-host count. `+ 3` sizes five hosts into a `/29`, whose
+8 addresses leave 4 usable — the subnet could not have held the fabric it was
+sized for. Two, three and four hosts are unaffected, which is why it survived.
+
+**The formula now lives in code, not here.**
+`gpufab-platform/tools/transport.py::fabric_subnet_prefix()` derives it from
+`gpufab-network/design/policy/transport.yaml`'s
+`gcp_subnet_reserved_addresses`, refuses a prefix that cannot hold the hosts it
+was asked for, and manifest R carries the result per rung. This block is the
+explanation; it is not a second source.
+
+Carved from a supernet wide enough for every region, with the allocation
 validated for overlap across both NICs' networks. Same rule as the pod management
 subnets (§3): sized to what it holds, never a fixed width.
 
