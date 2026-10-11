@@ -386,11 +386,31 @@ architecture document keeping the explanation and delegating the formula.
 
 Stage C stays closed until both:
 
-1. **Stage A green** — the remaining items are the device→host map threaded into
-   the probes, per-host execution and merge with a both-halves-measured
-   assertion, host-stratified sampling, unit-path convergence timing via the
-   existing `_phase_emit`, the per-link live-tunnel assertion, and the DF probe
-   driven from a SONiC switch.
+1. **Stage A green.** Done as of 2026-10-11:
+
+   * ~~the device→host map~~ — `tools/device_host.py`, **delegating** to
+     `gen_topology._shard` rather than re-deriving. Per host: the units present
+     there (a unit may straddle), and the EXACT switch count R places there.
+   * ~~per-host execution and merge with a both-halves-measured assertion~~ —
+     `tools/xhost_merge.py`. Each host's `switches_targeted` must **equal** its
+     expectation; `switches_unreadable` must be zero; facts that must agree
+     across hosts are checked rather than summed; and **a silent host yields
+     UNREADABLE with no total at all**, because a partial total of a two-host
+     fabric is indistinguishable from a complete one. Verified against S2's
+     real figures: 10 + 96 = 106 switches, 3728/3728 BGP.
+
+   Remaining:
+
+   * **host-stratified sampling.** The merge catches a short *total*, but
+     `SAMPLE=4` over `sorted(os.listdir())` can still put all four samples on
+     one host, so a per-host probe can pass having looked at one side of its own
+     half. Needs stratification plus an assertion that it stratified.
+   * the per-link live-tunnel assertion on the box (VNI, remote, port, both
+     interfaces) — `reconcile.py` checks endpoint presence only
+   * unit-path convergence timing via the existing `_phase_emit`, which already
+     carries a `host` field
+   * the DF probe driven from a SONiC switch (t58 declines one because the host
+     containers' busybox ping lacks `-M do`; the switches have a full ping)
 2. **containerlab 0.77's `type: vxlan` behaviour measured.** The emitter writes
    a topology-level `type: vxlan` link; both design documents describe
    `containerlab tools vxlan create` with tc redirect, and `vxlan-stitch`
