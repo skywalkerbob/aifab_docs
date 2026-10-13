@@ -424,10 +424,18 @@ Stage C stays closed until both:
    * **the coordinator must generate the `run_id`** and pass it to each probe.
      A probe invoked without `GPUFAB_RUN_ID` emits `run_id=NONE` and is refused,
      which is the right default but means the gate cannot be wired without it.
-   * **host-stratified sampling.** The merge catches a short *total*, but
-     `SAMPLE=4` over `sorted(os.listdir())` can still put all four samples on
-     one host, so a per-host probe can pass having looked at one side of its own
-     half. Needs stratification plus an assertion that it stratified.
+   * ~~host-stratified sampling~~ — `tools/stratify.py`. The defect was worse
+     than clustering: measured on this slice, `SAMPLE=4` over a sorted listing
+     examines **exactly one role per unit** — the rail leaves in a pod, never
+     the spines, frontend, storage or OOB switches — and the unit is then
+     declared PROVEN. Now stratified by `(host, unit, role)`, all three from the
+     model, 20 strata covering all 120 switches, deterministic so the
+     selected-set digest is checkable. A planned stratum with zero readable
+     observations is refused; an unreported one is UNREADABLE, not zero; and a
+     plan that does not declare what it **qualifies** is refused outright, with
+     the scope printed on every verdict including passes. The scope separates
+     *complete* coverage from sampling: 10 of the 20 strata hold ≤2 switches, so
+     "20 of 120 sampled" alone would hide which roles are covered.
    * the per-link live-tunnel assertion on the box (VNI, remote, port, both
      interfaces) — `reconcile.py` checks endpoint presence only
    * unit-path convergence timing via the existing `_phase_emit`, which already
