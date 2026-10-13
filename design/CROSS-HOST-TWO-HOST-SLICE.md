@@ -399,8 +399,31 @@ Stage C stays closed until both:
      fabric is indistinguishable from a complete one. Verified against S2's
      real figures: 10 + 96 = 106 switches, 3728/3728 BGP.
 
+   * ~~the fact envelope~~ — the arithmetic above was exact and verified
+     nothing about where its inputs came from. A fact file was identified by the
+     caller's `--facts HOST=PATH` label alone, and on this slice **both hosts
+     place exactly 60 switches**, so one host's plausible facts under two names
+     satisfied the 120-switch total while the other was silent. Every host now
+     emits, measured on the box: `facts_schema`, `host` (from `hostname`, not
+     handed in), `run_id` (the coordinator's, so a leftover file is refused),
+     `probe_rc_self` (from an EXIT trap, so a probe dying midway cannot leave a
+     zero), and `switch_set_sha256` over the devices it actually targeted — with
+     the matching digest frozen in the plan from R. Required fields are
+     required, identity keys included, because comparing identity only when it
+     happens to be present read as agreement when both hosts omitted it.
+     Parsing is strict: duplicate keys, malformed lines, unknown schema
+     versions and duplicate `--facts` all refuse.
+
+     `probe_rc_self` is **not** `probe_rc`: the schema assigns the latter to the
+     gate, which captures the status externally, and that external capture is
+     the independent one. The two must agree, and wiring that comparison is the
+     gate's — named here rather than claimed.
+
    Remaining:
 
+   * **the coordinator must generate the `run_id`** and pass it to each probe.
+     A probe invoked without `GPUFAB_RUN_ID` emits `run_id=NONE` and is refused,
+     which is the right default but means the gate cannot be wired without it.
    * **host-stratified sampling.** The merge catches a short *total*, but
      `SAMPLE=4` over `sorted(os.listdir())` can still put all four samples on
      one host, so a per-host probe can pass having looked at one side of its own
