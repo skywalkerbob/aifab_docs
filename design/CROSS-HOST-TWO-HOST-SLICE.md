@@ -436,8 +436,29 @@ Stage C stays closed until both:
      the scope printed on every verdict including passes. The scope separates
      *complete* coverage from sampling: 10 of the 20 strata hold ≤2 switches, so
      "20 of 120 sampled" alone would hide which roles are covered.
-   * the per-link live-tunnel assertion on the box (VNI, remote, port, both
-     interfaces) — `reconcile.py` checks endpoint presence only
+   * ~~the per-link live-tunnel assertion on the box~~ — `tools/tunnel_check.py`.
+     Keyed on the VNI (unique by construction, and the one field a miswiring
+     cannot preserve while swapping endpoints): remote, UDP port,
+     expected-but-absent, present-but-undeclared, and two devices sharing a
+     VNI. The expectation comes from the **deployed artifact**, not the model —
+     the t11-config-applied split, with t108 separately proving the artifact
+     matches R. `pair_ends()` joins two hosts for **both ends**: every VNI on
+     exactly two hosts with remotes pointing at each other.
+
+     **`iproute2 6.1.0` emits malformed JSON for a VXLAN device** — a stray
+     `fan-map` token outside the quoting, so `json.loads` fails. That is the
+     version Ubuntu 24.04 ships, and it fails *only when a VXLAN device
+     exists*, so `ip -j` would have passed every hand-written fixture and died
+     on the first real cross-host host. The parser reads the text form and the
+     fixture is **captured kernel output**.
+
+     **Still not asserted, and reported as such:** which local interface each
+     tunnel serves. The netdev's `dev` is the underlay NIC; the served
+     interface is reached by tc redirect or a bridge whose naming depends on
+     clab 0.77's behaviour — the undetermined item in §6.3. `judge_host` takes
+     an optional binding map and says `NOT-ASSERTED` without one, so a
+     VNI/remote/port match cannot be read as the full "both endpoints, both
+     interfaces" requirement.
    * unit-path convergence timing via the existing `_phase_emit`, which already
      carries a `host` field
    * the DF probe driven from a SONiC switch (t58 declines one because the host
