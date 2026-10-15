@@ -459,8 +459,15 @@ Stage C stays closed until both:
      an optional binding map and says `NOT-ASSERTED` without one, so a
      VNI/remote/port match cannot be read as the full "both endpoints, both
      interfaces" requirement.
-   * unit-path convergence timing via the existing `_phase_emit`, which already
-     carries a `host` field
+   * ~~unit-path convergence timing~~ — `deploy/phase_log.sh`. The functions
+     moved out of `lib.sh` because c12 does not source it and pulling all of
+     `lib.sh` in would change a live deploy path to add instrumentation. Five
+     phases now recorded where none were: `unit-executor`, `unit-ztp-serve`,
+     and in the gate `ztp-converge`, `evpn-reconcile`, `t92-postcondition`.
+     **`ztp-converge` is the number that never existed** — serving-up to
+     every-device-provisioned. `tools/phases.py` and `t16` consume it unchanged,
+     and a phase that began and never ended is reported under `OPEN` with no
+     duration, so unmeasured cannot read as fast.
    * the DF probe driven from a SONiC switch (t58 declines one because the host
      containers' busybox ping lacks `-M do`; the switches have a full ping)
 2. **containerlab 0.77's `type: vxlan` behaviour measured.** The emitter writes
