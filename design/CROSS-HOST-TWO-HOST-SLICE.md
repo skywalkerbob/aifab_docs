@@ -226,13 +226,23 @@ that cannot observe half its fabric measures nothing.
 
 **Stage A — host-free, no instance:**
 1. ~~per-link identity + VNI uniqueness~~ — **done** (t108, 34 assertions; t108-red)
-2. a device→host map from `place()['assign']`, threaded into the probes
-3. per-host probe execution and merge, with a both-halves-measured assertion
-4. host-stratified sampling, with the stratification asserted
-5. unit-path timing via the existing `_phase_emit`
-6. the per-link live-tunnel assertion (VNI, remote, port, both interfaces)
-7. a DF-probe instrument driven from a SONiC switch
-8. the two-host ownership scope rule — see the open decision below
+2. ~~a device→host map from `place()['assign']`, threaded into the probes~~ —
+   **done** (`tools/device_host.py`)
+3. ~~per-host probe execution and merge, with a both-halves-measured
+   assertion~~ — **done** (`tools/xhost_merge.py` + the fact envelope; t111,
+   t112)
+4. ~~host-stratified sampling, with the stratification asserted~~ — **done**
+   (`tools/stratify.py`; t112)
+5. ~~unit-path timing via the existing `_phase_emit`~~ — **done**
+   (`deploy/phase_log.sh`; t114)
+6. ~~the per-link live-tunnel assertion (VNI, remote, port, both
+   interfaces)~~ — **done** (`tools/tunnel_check.py`; t113) **except** which
+   local interface each tunnel serves, which §7 reports as NOT-ASSERTED
+7. ~~a DF-probe instrument driven from a SONiC switch~~ — **done**
+   (t115, 28 assertions incl. a live boundary; t115-red)
+8. ~~the two-host ownership scope rule~~ — **decided and implemented**
+   (§6.1; `tools/xhost_ownership.py`, t110) — one ledger per host, with
+   `CROSS_HOST_MUTUAL_EXCLUSION` a constant NOT-PROVEN
 9. ~~physical host names as a parameter~~ — **done** (`--fabric-hosts`), without
    which the slice cannot be named without using the live S1 host
 
@@ -386,7 +396,8 @@ architecture document keeping the explanation and delegating the formula.
 
 Stage C stays closed until both:
 
-1. **Stage A green.** Done as of 2026-10-11:
+1. **Stage A green.** All nine items landed as of 2026-10-16; the
+   host-free suite is 3033/0 across 93 phases:
 
    * ~~the device→host map~~ — `tools/device_host.py`, **delegating** to
      `gen_topology._shard` rather than re-deriving. Per host: the units present
@@ -419,11 +430,6 @@ Stage C stays closed until both:
      the independent one. The two must agree, and wiring that comparison is the
      gate's — named here rather than claimed.
 
-   Remaining:
-
-   * **the coordinator must generate the `run_id`** and pass it to each probe.
-     A probe invoked without `GPUFAB_RUN_ID` emits `run_id=NONE` and is refused,
-     which is the right default but means the gate cannot be wired without it.
    * ~~host-stratified sampling~~ — `tools/stratify.py`. The defect was worse
      than clustering: measured on this slice, `SAMPLE=4` over a sorted listing
      examines **exactly one role per unit** — the rail leaves in a pod, never
@@ -468,8 +474,32 @@ Stage C stays closed until both:
      every-device-provisioned. `tools/phases.py` and `t16` consume it unchanged,
      and a phase that began and never ended is reported under `OPEN` with no
      duration, so unmeasured cannot read as fast.
-   * the DF probe driven from a SONiC switch (t58 declines one because the host
-     containers' busybox ping lacks `-M do`; the switches have a full ping)
+   * ~~the DF probe driven from a SONiC switch~~ — `tools/df_probe.py`.
+     Measured on iputils 20240117, a frame **correctly rejected for exceeding
+     the MTU** and a frame that **never arrived** exit identically (`rc=1`), so
+     a probe reading the exit status would report an MTU boundary on a fabric
+     with no connectivity at all. Only the message separates them, and it names
+     the MTU it hit. A boundary is therefore judged as a **pair** — payload
+     M-28 must pass AND payload M-27 must be refused at exactly M — and if the
+     must-pass leg does not arrive the result is `UNREADABLE`, not a boundary.
+     The MTUs come from `transport.py`, so the probe asserts the catalog's
+     derived 8846/8796 rather than carrying a literal. Fixtures are captures,
+     including a real boundary located end to end in a netns at MTU 1400.
+     t58-mtu-headroom still declines the probe for the host containers, whose
+     busybox ping ignores `-M do`; a SONiC switch carries iputils.
+
+     **Not observed here:** the router-side `Frag needed and DF set (mtu=N)`
+     signature. If the cross-host path returns that shape instead of the local
+     error the gate reports `UNREADABLE` — fail-safe — and the pattern needs a
+     real capture before it can be trusted.
+
+   **Carried into Stage C, not into Stage A:** the acceptance script must
+   generate the `run_id` and pass it to each probe. A probe invoked without
+   `GPUFAB_RUN_ID` emits `run_id=NONE` and `xhost_merge` refuses it — the right
+   default, and it means the gate cannot be wired without the coordinator
+   supplying one. `tools/up.sh:172` already does this for S1/S2; the two-host
+   coordinator does not exist yet because it is the Stage C script itself.
+
 2. **containerlab 0.77's `type: vxlan` behaviour measured.** The emitter writes
    a topology-level `type: vxlan` link; both design documents describe
    `containerlab tools vxlan create` with tc redirect, and `vxlan-stitch`
