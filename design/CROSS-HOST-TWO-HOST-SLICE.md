@@ -431,7 +431,7 @@ architecture document keeping the explanation and delegating the formula.
 Stage C stays closed until all three:
 
 1. **Stage A green.** All nine items landed as of 2026-10-16. The host-free
-   suite is **72 phases / 2476 checks / 0 failures** (31 host phases skipped
+   suite is **75 phases / 2581 checks / 0 failures** (31 host phases skipped
    by request, so this is not a release gate). Counted on the phase summary
    lines only — an earlier "3033 across 93 phases" in this document was
    double-counting, adding each test's `VERDICT` line to its own summary. On
@@ -532,12 +532,36 @@ Stage C stays closed until all three:
      error the gate reports `UNREADABLE` — fail-safe — and the pattern needs a
      real capture before it can be trusted.
 
-   **Carried into Stage C, not into Stage A:** the acceptance script must
-   generate the `run_id` and pass it to each probe. A probe invoked without
-   `GPUFAB_RUN_ID` emits `run_id=NONE` and `xhost_merge` refuses it — the right
-   default, and it means the gate cannot be wired without the coordinator
-   supplying one. `tools/up.sh:172` already does this for S1/S2; the two-host
-   coordinator does not exist yet because it is the Stage C script itself.
+   **The coordinator now exists** — `deploy/checks/xhost-accept.sh`, with its
+   verdict logic in `tests/lib-xhost-accept.sh` and both tested by `t117` (55
+   assertions) and `t117-red` (19 controls), written before the run exists for
+   the reason `lib-n2probe.sh` gives: two paid runs have already ended on bugs
+   in an instrument that had no test. It generates the `run_id` once and hands
+   it to both probes, which is what `xhost_merge` requires and why the value
+   must be the coordinator's.
+
+   Three properties it holds, each with a mutation control behind it:
+
+   * **The verdict cannot collapse to one green light.** Transport is judged
+     over five legs; ownership is the declared constant NOT-PROVEN;
+     `S3 AUTHORIZATION: WITHHELD` prints unconditionally and no path prints a
+     grant. The standing RED also must NOT fail the run by itself, or a real
+     transport failure becomes indistinguishable from it in the exit status.
+   * **Convergence takes two consecutive clean censuses** (§4). A flap
+     converges at poll 4, not poll 1; an unreadable census breaks the streak
+     rather than counting toward it; zero expected is never converged.
+   * **It refuses a host that is carrying a lab**, measured by docker's
+     `containerlab` label rather than by a name list — a list would be a
+     second derivation of which machines are live and wrong the first time a
+     fabric moved. Proven against the real hosts: it refuses
+     `gpufab-s11-fabric` (258 containers) and `gpufab-fabric-01` (124), and
+     `--confirm-paid-run` does not override it. A host that cannot be *asked*
+     is refused too. This is the second lock on the door `--fabric-hosts`
+     opened, and the one that holds when the names change.
+
+   The leg driver itself is not wired — it needs the substrate — so a
+   confirmed run today reports every transport leg UNREADABLE, which is the
+   honest answer and not a pass.
 
 2. **D9: the verification was blind, is now FIXED — and the measurement it
    produced opens a separate, real question.**
