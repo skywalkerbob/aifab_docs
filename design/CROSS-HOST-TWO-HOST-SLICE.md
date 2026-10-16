@@ -192,6 +192,32 @@ that is why §2 does not use the slice that was free.
 | 5. `host_harden.sh --assert` after interfaces exist | the assert already does the right thing **when devices exist**; gate 1c can only check the drop-in file pre-deploy, and says so | call it again post-deploy, per host, when several hundred veths exist. Run 7 logged 425 `systemd-networkd … veth` events, so D9's effect at scale is still unproven |
 | 6. honestly bounded convergence timestamps | `_phase_emit` exists, **already carries a `host` field**, and `tools/phases.py` already filters by `--host`; `t16` asserts the instrumentation ran | the **unit path emits nothing** — no timing in `unit_executor.py`, `c12-unit-labs.sh`, `ztp_wait.sh`, `postprovision_gate.sh`. The shape is there; it is not called |
 
+### How the acceptance run decides the fabric has CONVERGED
+
+The shipped gate (`gpufab-network/tools/interim_deploy.py::converge`) is exact
+equality against `expected.py`'s per-device counts, inside a bounded wait whose
+only outcome is a report — never an action, because this project has reached
+`containerlab destroy` on 124 live nodes by acting on "BGP below threshold"
+while a fabric was still converging. Its census sums over **intent**: a device
+that did not answer contributes 0 to the numerator and its full expectation to
+the denominator, so unreachable cannot resemble converged.
+
+**The two-host gate must add one thing the shipped loop does not have.**
+`converge()` returns on the FIRST poll where nothing is short:
+
+    if not short or waited >= timeout:
+        return est_total, waited, short, census, n
+
+There is no stability requirement, so a fabric that momentarily touches the
+full count and then loses sessions passes that leg. On one host the later
+gates usually catch the flap. Across hosts a tunnel that comes up and drops is
+precisely the failure being hunted, so **the cross-host gate requires two
+consecutive clean censuses** before it reports converged, and reports the
+interval between them.
+
+This is additive and belongs to the new gate only: `converge()` itself is on
+the live S1/S2 deploy path and is not changed for this.
+
 ### The slice could not be NAMED, and that is now fixed
 
 `_shard()` built the physical host names from the literal
@@ -356,6 +382,14 @@ resource it does not own.
 * tunnel addresses are **outputs**, bound into R; the guest interface is
   resolved by its assigned IP, never by a device name like `ens5`
 
+**How the tunnel reaches nic1, measured rather than configured.** clab does not
+take an underlay interface: the `vxlan-stitch` netdev's `dev` is whatever the
+route to `remote` selects (`ens4` on the probe host — see §7 item 2). So
+binding the substrate to the fabric VPC is achieved by `remote` being a fabric
+subnet address and nothing else, which is also why the subnet's prefix and the
+absence of a default route on that VPC are load-bearing rather than tidy. The
+acceptance gate asserts the resulting `dev` per tunnel; it does not set it.
+
 > A GCP firewall rule's port specification **is** the destination port, and
 > source-port rules are unsupported — https://docs.cloud.google.com/firewall/docs/firewalls
 
@@ -394,10 +428,14 @@ architecture document keeping the explanation and delegating the formula.
 
 ## 7. Before the paid run
 
-Stage C stays closed until both:
+Stage C stays closed until all three:
 
-1. **Stage A green.** All nine items landed as of 2026-10-16; the
-   host-free suite is 3033/0 across 93 phases:
+1. **Stage A green.** All nine items landed as of 2026-10-16. The host-free
+   suite is **72 phases / 2476 checks / 0 failures** (31 host phases skipped
+   by request, so this is not a release gate). Counted on the phase summary
+   lines only — an earlier "3033 across 93 phases" in this document was
+   double-counting, adding each test's `VERDICT` line to its own summary. On
+   the same basis the run before this work was 70 / 2411.
 
    * ~~the device→host map~~ — `tools/device_host.py`, **delegating** to
      `gen_topology._shard` rather than re-deriving. Per host: the units present
@@ -460,11 +498,12 @@ Stage C stays closed until both:
 
      **Still not asserted, and reported as such:** which local interface each
      tunnel serves. The netdev's `dev` is the underlay NIC; the served
-     interface is reached by tc redirect or a bridge whose naming depends on
-     clab 0.77's behaviour — the undetermined item in §6.3. `judge_host` takes
-     an optional binding map and says `NOT-ASSERTED` without one, so a
-     VNI/remote/port match cannot be read as the full "both endpoints, both
-     interfaces" requirement.
+     interface is reached by a tc redirect whose naming depended on clab
+     0.77's behaviour. **That behaviour was measured on 2026-10-16** (see §7
+     item 2) and the convention is `vx-<node>_<iface>`, so
+     `binding_from_expected()` now derives the map and `judge_host` asserts it.
+     A caller that passes no map still gets `NOT-ASSERTED` — the function will
+     not silently assert a convention its caller never asked about.
    * ~~unit-path convergence timing~~ — `deploy/phase_log.sh`. The functions
      moved out of `lib.sh` because c12 does not source it and pulling all of
      `lib.sh` in would change a live deploy path to add instrumentation. Five
@@ -500,9 +539,111 @@ Stage C stays closed until both:
    supplying one. `tools/up.sh:172` already does this for S1/S2; the two-host
    coordinator does not exist yet because it is the Stage C script itself.
 
-2. **containerlab 0.77's `type: vxlan` behaviour measured.** The emitter writes
-   a topology-level `type: vxlan` link; both design documents describe
-   `containerlab tools vxlan create` with tc redirect, and `vxlan-stitch`
-   appears nowhere in any repo. NOT DETERMINED without the installed version.
-   The Stage-C hosts are the right place to settle it — before the acceptance
-   run, not during it.
+2. **OPEN — D9's verification is near-blind, MEASURED on the live S1 host, and
+   the substrate choice makes it matter more.**
+
+   Two separate things, and the first one is NOT the defect I expected.
+
+   **The match is correct.** `deploy/host_harden.sh` writes
+
+       [Match]
+       Driver=veth bridge
+
+   matching by driver deliberately — "a name glob like `eth*` could strand the
+   host". On `gpufab-fabric-01`, `udevadm info -q property` reports
+   `ID_NET_DRIVER=veth` for a containerlab veth and `=bridge` for `docker0`,
+   which is the key systemd matches on. The guard does what it says.
+
+   **The assert is the problem.** It enumerates
+
+       networkctl --no-legend list | awk '$3=="bridge"||$3=="veth"{print $2}'
+
+   and on systemd 255 — Ubuntu 24.04, what these hosts run — a veth's TYPE
+   column reads **`ether`**, not `veth`. Measured on `gpufab-fabric-01`:
+
+       networkctl lists 130 device(s); the --assert filter selects 2
+       TYPE histogram:  127 ether   2 bridge   1 loopback
+
+   Measured on `gpufab-s11-fabric` (S2), which DOES carry the drop-in:
+
+       networkctl lists 1474 device(s); the --assert filter selects 405
+       TYPE histogram:  1068 ether   405 bridge   1 loopback
+
+   On both hosts every selected device is a **bridge**. **No veth has ever
+   been examined by `--assert`** — the check that exists to prove
+   containerlab's veths are unmanaged has never looked at one, and prints
+   *"all N veth/bridge device(s) are unmanaged (D9 effect confirmed)"* while
+   doing it. Leg 5 of the acceptance run is precisely "call `--assert` again,
+   per host, once several hundred veths exist": the call that would confirm
+   nothing.
+
+   The repair is to enumerate on the SAME key the Match uses rather than on a
+   different one: the link kind from a single `ip -d link show` (`veth`,
+   `bridge`, `vxlan`), which is one derivation and fast enough at S3's device
+   counts. `networkctl` then supplies the state per named device.
+
+   **Still unmeasured:** whether a VXLAN netdev's `ID_NET_DRIVER` is `vxlan`,
+   and therefore whether `Driver=veth bridge` leaves it MANAGED. If it does,
+   `vxlan-stitch` adds one uncovered device per crossing link — 800 at
+   S3-4096, appearing during a build, which is the storm D9 exists for. The
+   probe is being extended to report each created device's driver and its
+   networkd state from the box, so the answer is an observation rather than an
+   inference about systemd's matching rules. The candidate fix is
+   `Driver=veth bridge vxlan`, a no-op on S1/S2 whose tenant VXLAN lives
+   inside the SONiC containers' own namespaces.
+
+   **Not a regression, and worth saying so:** the drop-in is absent on
+   `gpufab-fabric-01` because that host's checkout is `a7b0d43` (2026-09-05)
+   and `host_harden.sh` landed 2026-09-12. The host is behind; the fix is not
+   lost.
+
+3. ~~**containerlab 0.77's `type: vxlan` behaviour measured.**~~ **MEASURED
+   2026-10-16** on `gpufab-ops-01` — clab 0.77.0, docker present, no
+   containerlab lab on it, so it cost nothing and disturbed no fabric. The
+   instrument is `gpufab-platform/tests/clab-vxlan-probe.sh`; the captures are
+   committed as `tests/fixtures/clab077-*.txt`; `t116` judges them.
+
+   **Both link types exist in 0.77.0 and they build different things:**
+
+   | | `type: vxlan` | `type: vxlan-stitch` |
+   |---|---|---|
+   | tunnel netdev lives in | the **node's** netns, named for the endpoint interface | the **host's** netns, as `vx-<node>_<iface>` |
+   | underlay `dev` | the node's `eth0` — **the clab management interface** | the host NIC, resolved by the route to `remote` |
+   | the node sees | the VXLAN device itself | an ordinary veth, peer `ve-<node>_<iface>` |
+   | stitching | none | tc ingress `mirred` redirect, **both** directions |
+   | `udp-port`, `remote` | honoured | honoured |
+
+   **The emitter now writes `vxlan-stitch`.** `type: vxlan` would carry the
+   substrate over the **management** network, which defeats the §6.3 contract
+   — a fabric VPC with no default route, no external address and one firewall
+   rule — completely and without any error. It is also the only one of the two
+   that hands a `sonic-vm` node an ordinary interface to bridge.
+
+   Three consequences, each now asserted rather than described:
+
+   * **The interface binding is no longer NOT-ASSERTED.** The naming is
+     deterministic, so `tunnel_check.binding_from_expected()` derives
+     `vx-<node>_<iface>` from the artifact's own endpoints and `judge_host`
+     checks it. A device on the box that does not follow the convention falls
+     out of the map and is reported, rather than ignored.
+   * **clab computes the tunnel MTU itself: underlay − 50.** Measured at
+     1460 → 1410. On the 8896 fabric VPC that is 8846 — *identical* to
+     `transport.py`'s derived `cross_host_ip_mtu`. Two independent derivations
+     of one number is the condition this codebase keeps failing on, so t116
+     asserts they are equal rather than enjoying the coincidence.
+   * **The stitched veth keeps its own MTU.** Node-side `eth1` and host-side
+     `ve-n1_eth1` both stayed at **9500** while the tunnel sat at **1410**.
+     Nothing in clab reconciles them. A frame in that range is dropped **at the
+     tc redirect** — not at an IP forwarding decision — so there is no ICMP,
+     no PMTUD, and no counter the node can see. **The acceptance gate must
+     assert the veth MTUs and not only the tunnel's**; asserting the tunnel
+     alone passes a fabric that cannot carry a full-size frame.
+
+   One defect in the instrument is worth recording because it is the project's
+   own signature: `node_ip()` was called without shifting its first argument,
+   so `nsenter` ran the container *name* as its command, every node-namespace
+   capture came back empty, and the probe emitted `node_eth1=ABSENT` — a
+   plausible value for something it had never looked at. The first reading of
+   this measurement was therefore exactly backwards: `type: vxlan` was recorded
+   as creating nothing at all. The probe now reports `UNMEASURED` when the
+   namespace was not read, and t116 asserts both the shift and that path.
