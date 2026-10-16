@@ -539,63 +539,69 @@ Stage C stays closed until all three:
    supplying one. `tools/up.sh:172` already does this for S1/S2; the two-host
    coordinator does not exist yet because it is the Stage C script itself.
 
-2. **OPEN — D9's verification is near-blind, MEASURED on the live S1 host, and
-   the substrate choice makes it matter more.**
+2. **D9: the verification was blind, is now FIXED — and the measurement it
+   produced opens a separate, real question.**
 
-   Two separate things, and the first one is NOT the defect I expected.
+   **The match was never the problem.** `[Match] Driver=veth bridge` is
+   correct: `udevadm` reports `ID_NET_DRIVER=veth` for a containerlab veth and
+   `=bridge` for `docker0`, which is the key systemd matches on.
 
-   **The match is correct.** `deploy/host_harden.sh` writes
+   **The assert was.** It enumerated `networkctl list` rows whose TYPE column
+   read `bridge` or `veth`, and on systemd 255 — Ubuntu 24.04, what these
+   hosts run — a veth's TYPE reads **`ether`**:
 
-       [Match]
-       Driver=veth bridge
+       gpufab-fabric-01   130 devices listed -> the filter selected   2
+       gpufab-s11-fabric 1474 devices listed -> the filter selected 405
 
-   matching by driver deliberately — "a name glob like `eth*` could strand the
-   host". On `gpufab-fabric-01`, `udevadm info -q property` reports
-   `ID_NET_DRIVER=veth` for a containerlab veth and `=bridge` for `docker0`,
-   which is the key systemd matches on. The guard does what it says.
+   every one of them a bridge. **No veth had ever been examined** by the check
+   whose purpose is to prove containerlab's veths are unmanaged, and it
+   printed *"all N veth/bridge device(s) are unmanaged (D9 effect confirmed)"*
+   while doing it. Leg 5 of the acceptance run is exactly that call at scale.
 
-   **The assert is the problem.** It enumerates
+   It now enumerates on the link KIND from one `ip -d link show` — `veth
+   bridge vxlan`, the same key the Match corresponds to — and looks every
+   state up in a single listing rather than spawning one `networkctl status`
+   per device. Run against the live S2 host it examines **1472 devices instead
+   of 405** and refuses:
 
-       networkctl --no-legend list | awk '$3=="bridge"||$3=="veth"{print $2}'
+       .. 1472 device(s) of kind {veth bridge vxlan}: 968 unmanaged, 504 pending,
+          0 managed, 0 unlisted
+       FAIL 504 of 1472 device(s) are 'pending': udev has not initialised them,
+            so the Driver= match cannot have applied.
+       VERDICT: REFUSE
 
-   and on systemd 255 — Ubuntu 24.04, what these hosts run — a veth's TYPE
-   column reads **`ether`**, not `veth`. Measured on `gpufab-fabric-01`:
+   **`0 managed` is the reassuring half:** the D9 pathology itself — networkd
+   actively configuring containerlab's devices — is not occurring on that
+   host.
 
-       networkctl lists 130 device(s); the --assert filter selects 2
-       TYPE histogram:  127 ether   2 bridge   1 loopback
+   **`504 pending` is the new question, and it is a real one.** Sampled, those
+   devices have `Link File: n/a`, an empty `ID_NET_DRIVER` and an empty
+   `USEC_INITIALIZED`: **udev has not initialised them at all**. Systemd's
+   `Driver=` matches on a udev property, so the drop-in *cannot* apply to a
+   device in that state — and at containerlab scale the devices arrive faster
+   than udev processes them. The pending set carries containerlab's
+   `clab-o-*` altnames; the unmanaged set is docker's `veth*`. So the guard
+   provably does not cover the devices it exists for, on 47% of them, on the
+   live S2 host.
 
-   Measured on `gpufab-s11-fabric` (S2), which DOES carry the drop-in:
+   The candidate repair is `[Match] Kind=veth bridge vxlan` — `Kind` comes
+   from the kernel's `IFLA_INFO_KIND` over rtnetlink and needs no udev — but
+   that is **NOT MEASURED**, because settling it means writing a drop-in and
+   reloading `systemd-networkd`, and the only hosts available to try it on are
+   the SoT host and two live fabrics. **It belongs on the Stage-C disposable
+   hosts**, where a networkd reload costs nothing, and it is listed here so it
+   is not discovered during the acceptance run.
 
-       networkctl lists 1474 device(s); the --assert filter selects 405
-       TYPE histogram:  1068 ether   405 bridge   1 loopback
+   Two smaller measured facts, recorded so a change to either is visible:
+   a VXLAN netdev's driver IS `vxlan` (so `Driver=veth bridge` does not match
+   it) and `networkctl` types it `vxlan` (so the old filter missed it too) —
+   but on a host with no drop-in at all networkd left the tunnel `unmanaged`
+   of its own accord while actively `configuring` the veth. **The veth is the
+   dangerous device, not the tunnel**, which is the opposite of what the
+   substrate choice first suggested.
 
-   On both hosts every selected device is a **bridge**. **No veth has ever
-   been examined by `--assert`** — the check that exists to prove
-   containerlab's veths are unmanaged has never looked at one, and prints
-   *"all N veth/bridge device(s) are unmanaged (D9 effect confirmed)"* while
-   doing it. Leg 5 of the acceptance run is precisely "call `--assert` again,
-   per host, once several hundred veths exist": the call that would confirm
-   nothing.
-
-   The repair is to enumerate on the SAME key the Match uses rather than on a
-   different one: the link kind from a single `ip -d link show` (`veth`,
-   `bridge`, `vxlan`), which is one derivation and fast enough at S3's device
-   counts. `networkctl` then supplies the state per named device.
-
-   **Still unmeasured:** whether a VXLAN netdev's `ID_NET_DRIVER` is `vxlan`,
-   and therefore whether `Driver=veth bridge` leaves it MANAGED. If it does,
-   `vxlan-stitch` adds one uncovered device per crossing link — 800 at
-   S3-4096, appearing during a build, which is the storm D9 exists for. The
-   probe is being extended to report each created device's driver and its
-   networkd state from the box, so the answer is an observation rather than an
-   inference about systemd's matching rules. The candidate fix is
-   `Driver=veth bridge vxlan`, a no-op on S1/S2 whose tenant VXLAN lives
-   inside the SONiC containers' own namespaces.
-
-   **Not a regression, and worth saying so:** the drop-in is absent on
-   `gpufab-fabric-01` because that host's checkout is `a7b0d43` (2026-09-05)
-   and `host_harden.sh` landed 2026-09-12. The host is behind; the fix is not
-   lost.
+   Not a regression: the drop-in is absent on `gpufab-fabric-01` because its
+   checkout `a7b0d43` (2026-09-05) predates `host_harden.sh` (2026-09-12).
 
 3. ~~**containerlab 0.77's `type: vxlan` behaviour measured.**~~ **MEASURED
    2026-10-16** on `gpufab-ops-01` — clab 0.77.0, docker present, no
