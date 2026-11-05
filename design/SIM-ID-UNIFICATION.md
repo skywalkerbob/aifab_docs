@@ -1,7 +1,7 @@
 # Sim id: one derivation — IN PROGRESS
 
-Status: **landed for the credential path; IN FLIGHT for the runner label and the
-artifact-bucket namespace.**
+Status: **COMPLETE.** Every consumer resolves through `tools/sim_id.sh`; no sim
+id anywhere falls back to a hostname, and none is laundered into a usable value.
 Last updated: 2026-11-05
 
 ---
@@ -13,9 +13,9 @@ The **sim id** is the namespace key a sim's per-sim resources are named for:
 | consumer | resource | state |
 |---|---|---|
 | Secret Manager | `gpufab-netbox-token-<sim>`, `gpufab-oob-*-<sim>`, `gpufab-snmp-secret-<sim>` | **DONE** |
-| GitHub Actions | the self-hosted runner's name and its `sim-<id>` label | **IN FLIGHT** |
-| artifact bucket / GitOps repo | `instances/<sim>/` | **IN FLIGHT** |
-| `result.json` | its `sim_id` field | not started |
+| GitHub Actions | the self-hosted runner's name and its `sim-<id>` label | **DONE** |
+| artifact bucket / GitOps repo | `instances/<sim>/` | **DONE** |
+| `result.json` | its `sim_id` field | **DONE** (UNRESOLVED, never "unknown") |
 | log shipping | the log prefix | arguably a host identity, not this |
 
 It is **not a host name**, and that confusion is the whole defect.
@@ -133,3 +133,66 @@ reading of mine that assumed otherwise was wrong.
    rename, to make the id explicit while the hostname it used to be derived
    from changed underneath. `tools/up.sh` now writes it too, but a host
    provisioned before that still has only the ambiguous `instance-id`.
+
+
+---
+
+## Closed 2026-11-05
+
+Seven remaining sites converted, plus `deploy/lib.sh`'s `result.json` field.
+Pushed: `gpufab-platform` `d49ccf0`, `gpufab-network` `2d285bf`, gated on a
+105-phase suite at 3573 PASS / 0 FAIL.
+
+**THE SWEEP THAT SAID "ONE DERIVATION" WAS WRONG.** t123 keyed on SHAPES —
+`hostname -s | sed` and `%-ops` — and three live derivations used neither:
+`bot/setup_runner.sh` fell back to `hostname -s`, `bot/setup_automation.sh` to
+bare `hostname` (not even `-s`, so on a host with a domain it answered
+differently again), and `bot/webhook_relay.py` reimplemented the order in Python
+ending `or "default"`. The sweeps now key on the **fallback**, which is what
+every variant shares:
+
+- no identity anywhere falls back to a hostname;
+- no unresolvable sim id is laundered into a usable value.
+
+Probes that report the host name AS A FACT are excluded — they are not standing
+in for something they could not resolve — and `image-scrub.sh`'s
+`|| echo absent` is exempt BY NAME, with its presence asserted so the sweep
+cannot become a scan of an empty set.
+
+### Two defects introduced and caught during the work
+
+1. **A comment inside a `<<JSON` heredoc.** A heredoc body is literal, so the
+   explanation was emitted INTO `result.json` and made it unparseable. `t31`
+   reported it as *"no result-fabric.json was written at all"* in four cases —
+   the file WAS written and could not be read. Confirmed self-inflicted by
+   reverting `lib.sh` to HEAD (43/0 before, 4 failures after) rather than
+   assumed. Now guarded as `t22` **F16**, keyed on the delimiter being JSON so a
+   legitimate comment in a shell heredoc does not fire it.
+2. **Two new assertions defeated by prose.** `GPUFAB_INSTANCE_ID` and
+   `gpufab-platform` appear in `render.py`'s docstring and in its
+   operator-facing refusal message, which legitimately names the command to
+   run. Replaced with AST walks. That is the third time in this work that a
+   grep was satisfied by the explanation beside the thing it checks.
+
+### A stale hostname was costing a live assertion
+
+The ops-side code references were deliberately reverted while the ops rename
+was deferred, and not restored when it was done. `tests/verify.sh`'s `OPS_HOST`
+default still said `gpufab-ops-01`, and `t49`'s live publish check reported
+
+    SKIP  gpufab-ops-01 is unreachable — live publish check NOT attempted
+          (this is not a pass)
+
+and would have reported it forever: **a check that cannot reach its host does
+not fail, it stops measuring.** Corrected, `t49` goes 17 passed / 0 failed /
+**zero skipped**. The only reason it was visible is that whoever wrote that
+`t_skip` appended "this is not a pass"; worded as a bare skip it would have read
+as nothing to see.
+
+### Still deliberately derived, and why
+
+`deploy/95-logship.sh` and `monitoring/logship.sh` read the id for a LOG PREFIX,
+and `tools/up.sh` keeps `${GPUFAB_SIM_ID:-${OPS%-ops}}` as the documented
+workstation default — it cannot read the published `gpufab-sim-id` metadata
+until terraform has applied it, which is a bootstrap ordering constraint and not
+a preference. All three are named exemptions in `t123`, asserted present.
